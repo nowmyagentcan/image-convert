@@ -120,8 +120,10 @@ name = "image-convert"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "gif",
  "image",
  "jpeg-encoder",
+ "png",
  "zune-jpeg",
 ]
 
