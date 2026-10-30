@@ -136,9 +136,10 @@ pub fn encode(image: &Image, format: Format, quality: u8, exif: Option<&[u8]>) -
                 ExtendedColorType::Rgb8,
                 ExtendedColorType::Rgba8,
             ][image.layout.channels() - 1];
+            // zlib level 3: within a few percent of the default level's size, 4-5 times faster.
             let mut encoder = PngEncoder::new_with_quality(
                 &mut out,
-                CompressionType::Default,
+                CompressionType::Level(3),
                 FilterType::Adaptive,
             );
             if let Some(exif) = exif {
