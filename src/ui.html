@@ -128,29 +128,11 @@ const WARN = icon("M236.8,188.09,149.35,36.22h0a24.76,24.76,0,0,0-42.7,0L19.2,18
 const FAIL = icon("M165.66,101.66,139.31,128l26.35,26.34a8,8,0,0,1-11.32,11.32L128,139.31l-26.34,26.35a8,8,0,0,1-11.32-11.32L116.69,128,90.34,101.66a8,8,0,0,1,11.32-11.32L128,116.69l26.34-26.35a8,8,0,0,1,11.32,11.32ZM232,128A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z");
 if (/Mac|iPhone|iPad/.test(navigator.userAgent)) $("#key").textContent = "Cmd";
 
-// Sample answers ({file, blob}) in the server's shape, until the page talks to it.
+// One upload to the server: {file, blob} on 200 and 422 alike; a file without `input` is a run-level error.
 async function convert(file, options) {
-  await new Promise(r => setTimeout(r, 500));
-  const stem = file.name.replace(/\.[^.]+$/, ""), none = { output: null, format: null, width: null, height: null, bytes: null, quality: null, resized: null, exif: null };
-  const src = (width, height, alpha, orientation, color, profile, decoder) => ({ width, height, bit_depth: 8, alpha, frames: 1, orientation, color, profile, decoder });
-  if (/\.heif$/i.test(file.name)) return { file: { input: file.name, input_format: "heic", source: null, ...none, warnings: [], error: { code: "codec_missing",
-    message: "Windows can't decode HEIC: the HEVC decoder isn't installed.",
-    hint: "Install \"HEVC Video Extensions from Device Manufacturer\" (free) from the Microsoft Store: ms-windows-store://pdp/?ProductId=9N4WGH0Z6VHQ (or \"HEVC Video Extensions\", 9NMZLZ57R3T7)." } }, blob: null };
-  const svg = /\.svgz?$/i.test(file.name), heic = /\.heic$/i.test(file.name);
-  const source = svg ? src(512, 128, true, 1, "srgb", null, "builtin") : heic ? src(4032, 3024, false, 6, "converted", "Display P3", "wic") : src(2880, 1800, false, 1, "srgb", null, "builtin");
-  const [w, h] = source.orientation > 4 ? [source.height, source.width] : [source.width, source.height];
-  const [side, mp] = { vision: [1568, 1.15], "vision-hd": [2048, 2.4] }[options.fit] || [options.max_side || Infinity, Infinity];
-  const scale = Math.min(1, side / Math.max(w, h), Math.sqrt(mp * 1e6 / (w * h)));
-  const width = Math.max(1, Math.floor(w * scale)), height = Math.max(1, Math.floor(h * scale));
-  const format = options.to || (heic ? "jpeg" : "png");
-  const c = new OffscreenCanvas(Math.ceil(width / 8), Math.ceil(height / 8)), x = c.getContext("2d");
-  x.fillStyle = svg ? "#7c3aed" : "#9fb0bd"; x.fillRect(0, svg ? c.height * .2 : 0, c.width, svg ? c.height * .6 : c.height);
-  if (!svg) { x.fillStyle = "#5e7458"; x.fillRect(0, c.height * .6, c.width, c.height); }
-  return { file: { input: file.name, output: `${stem}.${format === "jpeg" ? "jpg" : format}`, input_format: svg ? "svg" : heic ? "heic" : "png", source,
-    format, width, height, bytes: svg ? 9312 : Math.round(width * height * { png: 1.1, jpeg: .187, webp: .13 }[format]), quality: format === "png" ? null : options.quality || 85,
-    resized: width !== w || height !== h, exif: false, error: null,
-    warnings: svg ? [{ code: "external_image_skipped", message: "An image linked from outside the file (photo.jpg) was left out." }] : [] },
-    blob: await c.convertToBlob({ type: `image/${format}` }) };
+  const r = await fetch("/api/convert", { method: "POST", headers: { "X-File-Name": encodeURIComponent(file.name), "X-Options": JSON.stringify(options) }, body: file });
+  if (r.ok) return { file: JSON.parse(decodeURIComponent(r.headers.get("X-Result"))), blob: await r.blob() };
+  return { file: await r.json(), blob: null };
 }
 
 // Names come from the user's files and messages from the server: textContent only, with controls and bidi marks shown by code point, as the CLI does.

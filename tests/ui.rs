@@ -32,6 +32,7 @@ fn page_loads_nothing_from_another_host() {
             );
         }
     }
+    assert!(PAGE.contains(r#"fetch("/api/convert""#));
 }
 
 /// A folder for one test holding `photo.png` (a 300 × 200 gradient) and `logo.svg`.
