@@ -1,0 +1,13 @@
+[package]
+name = "image-convert"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Convert HEIC, AVIF, JPEG XL, SVG, TIFF and camera RAW images to PNG, JPEG or WebP"
+repository = "https://github.com/nowmyagentcan/image-convert"
+publish = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
