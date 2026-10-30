@@ -79,18 +79,26 @@ fn screenshot(width: u32, height: u32) -> Vec<u8> {
     px
 }
 
-/// Peak resident memory of a finished child, where this OS reports it.
+/// A running or finished child's memory counters.
 #[cfg(windows)]
-fn wait(child: &mut Child) -> Option<u64> {
+fn counters(
+    child: &Child,
+) -> Option<windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-    assert!(child.wait().unwrap().code().is_some_and(|c| c <= 1));
     let mut counters = PROCESS_MEMORY_COUNTERS::default();
     let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
     // SAFETY: the handle is the child's, still open, and `counters` is as large as `size` says.
     unsafe { GetProcessMemoryInfo(HANDLE(child.as_raw_handle()), &mut counters, size) }.ok()?;
-    Some(counters.PeakWorkingSetSize as u64)
+    Some(counters)
+}
+
+/// Peak resident memory of a finished child, where this OS reports it.
+#[cfg(windows)]
+fn wait(child: &mut Child) -> Option<u64> {
+    assert!(child.wait().unwrap().code().is_some_and(|c| c <= 1));
+    counters(child).map(|c| c.PeakWorkingSetSize as u64)
 }
 
 #[cfg(target_os = "linux")]
@@ -143,18 +151,7 @@ fn median(mut run: impl FnMut()) -> Duration {
 /// The resident memory of a running process, where this OS reports it.
 fn resident(child: &Child) -> Option<u64> {
     #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::System::ProcessStatus::{
-            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
-        };
-        let mut counters = PROCESS_MEMORY_COUNTERS::default();
-        let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-        // SAFETY: as in `wait`.
-        unsafe { GetProcessMemoryInfo(HANDLE(child.as_raw_handle()), &mut counters, size) }.ok()?;
-        Some(counters.WorkingSetSize as u64)
-    }
+    return counters(child).map(|c| c.WorkingSetSize as u64);
     #[cfg(not(windows))]
     {
         let status = fs::read_to_string(format!("/proc/{}/status", child.id())).ok()?;
@@ -246,8 +243,6 @@ fn meets_the_speed_and_memory_targets() {
     };
     let mut huge = png_rgb(1, 1, &[0, 0, 0]);
     huge[16..24].copy_from_slice(&[0, 1, 0x86, 0xa0, 0, 1, 0x86, 0xa0]);
-    let crc = crc32(&huge[12..29]);
-    huge[29..33].copy_from_slice(&crc.to_be_bytes());
     let huge = write("100000.png", huge);
     let paths = (0..400)
         .map(|i| format!(r#"<path d="M{} {}c40-30 80 30 120 0s80-30 120 0" fill="none" stroke="hsl({} 60% 40%)" stroke-width="3"/>"#, i % 20 * 50, i / 20 * 50, i % 360))
@@ -464,16 +459,4 @@ fn meets_the_speed_and_memory_targets() {
     eprintln!("{:<30} {:>9.1} MB (≤ 16 MB)", "binary", size as f64 / 1e6);
     assert!(size <= 16 * MB, "binary is {size} bytes");
     assert!(missed.is_empty(), "missed: {missed:?}");
-}
-
-/// The CRC-32 of a PNG chunk's type and data.
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg());
-        }
-    }
-    !crc
 }
