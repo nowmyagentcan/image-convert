@@ -1,0 +1,4 @@
+[submodule "vendor/libwebp"]
+	path = vendor/libwebp
+	url = https://github.com/webmproject/libwebp.git
+	shallow = true

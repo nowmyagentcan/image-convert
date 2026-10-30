@@ -11,3 +11,9 @@ publish = false
 lto = true
 codegen-units = 1
 strip = true
+
+[build-dependencies]
+cc = "1.10.0"
+
+[dev-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["webp"] }
