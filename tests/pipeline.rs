@@ -7,7 +7,8 @@ use std::path::Path;
 use common::*;
 use image_convert::color::to_srgb;
 use image_convert::detect::{Kind, detect};
-use image_convert::{Image, Layout, Pixels, jpeg, raster};
+use image_convert::resize::size_and_orient;
+use image_convert::{Image, Layout, Options, Pixels, jpeg, raster};
 use jpeg_encoder::ColorType as Jpeg;
 use moxcms::ColorProfile;
 
@@ -21,6 +22,16 @@ fn decode(data: &[u8]) -> Pixels {
 
 fn srgb(data: &[u8]) -> Image {
     to_srgb(&mut decode(data)).0
+}
+
+fn mean_diff(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let sum: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| f64::from(x.abs_diff(*y)))
+        .sum();
+    sum / a.len() as f64
 }
 
 /// CIELAB (D65) of an sRGB colour.
@@ -205,4 +216,101 @@ fn a_broken_profile_is_ignored_with_a_warning() {
         ("ignored", vec![10, 20, 30, 40, 50, 60])
     );
     assert_eq!(px.warnings[0].code, "icc_ignored");
+}
+
+/// The stored pixels that EXIF `orientation` turns into `upright`, by the image crate's inverse.
+fn stored(upright: &image::RgbImage, orientation: u8) -> image::RgbImage {
+    let inverse = match orientation {
+        6 => 8,
+        8 => 6,
+        o => o,
+    };
+    let mut img = image::DynamicImage::ImageRgb8(upright.clone());
+    img.apply_orientation(image::metadata::Orientation::from_exif(inverse).unwrap());
+    img.into_rgb8()
+}
+
+#[test]
+fn every_orientation_comes_out_upright_and_pixel_equal() {
+    let upright =
+        image::RgbImage::from_fn(5, 3, |x, y| image::Rgb([x as u8 * 50, y as u8 * 100, 7]));
+    for orientation in 1..=8 {
+        let raw = stored(&upright, orientation);
+        let file = png(
+            raw.width(),
+            raw.height(),
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            &raw,
+            |info| {
+                info.exif_metadata = Some(exif_orientation(orientation.into()).into());
+            },
+        );
+        let mut px = decode(&file);
+        assert_eq!(px.orientation, orientation);
+        let image = size_and_orient(to_srgb(&mut px).0, px.orientation, &Options::default());
+        assert_eq!(
+            (image.width, image.height),
+            (5, 3),
+            "orientation {orientation}"
+        );
+        assert_eq!(
+            image.data,
+            upright.as_raw().as_slice(),
+            "orientation {orientation}"
+        );
+
+        let file = jpeg(
+            raw.width() as u16,
+            raw.height() as u16,
+            Jpeg::Rgb,
+            &raw,
+            |e| {
+                e.set_quality(100);
+                e.add_exif_metadata(&exif_orientation(orientation.into()))
+                    .unwrap();
+            },
+        );
+        let mut px = decode(&file);
+        let image = size_and_orient(to_srgb(&mut px).0, px.orientation, &Options::default());
+        assert_eq!(
+            (image.width, image.height),
+            (5, 3),
+            "jpeg orientation {orientation}"
+        );
+        let diff = mean_diff(&image.data, upright.as_raw());
+        assert!(diff <= 2.0, "jpeg orientation {orientation}: {diff}");
+    }
+}
+
+#[test]
+fn sizes_are_for_the_upright_image_and_resizing_comes_first() {
+    let upright =
+        image::RgbImage::from_fn(30, 40, |x, y| image::Rgb([x as u8 * 8, y as u8 * 6, 90]));
+    let options = Options {
+        max_side: Some(20),
+        ..Options::default()
+    };
+    let direct = size_and_orient(
+        Image {
+            width: 30,
+            height: 40,
+            layout: Layout::Rgb,
+            data: upright.to_vec(),
+        },
+        1,
+        &options,
+    );
+    for orientation in [6, 7] {
+        let raw = stored(&upright, orientation);
+        let image = Image {
+            width: raw.width(),
+            height: raw.height(),
+            layout: Layout::Rgb,
+            data: raw.into_raw(),
+        };
+        let image = size_and_orient(image, orientation, &options);
+        assert_eq!((image.width, image.height), (15, 20));
+        assert!(mean_diff(&image.data, &direct.data) <= 1.0);
+    }
 }

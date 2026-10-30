@@ -1,9 +1,28 @@
-//! Output sizes from presets and limits, and Lanczos3 resizing on premultiplied alpha.
+//! Output sizes from presets and limits, Lanczos3 resizing on premultiplied alpha, and turning
+//! images upright.
 
+use crate::{Image, Options};
 use fast_image_resize::images::{Image as Buffer, ImageRef};
 use fast_image_resize::{PixelType, Resizer};
 
-use crate::{Image, Options};
+/// Sizes a stored image for its upright shape, resizes it, then applies the EXIF `orientation`,
+/// so a large photo is never turned at full size.
+pub fn size_and_orient(image: Image, orientation: u8, options: &Options) -> Image {
+    let swap = orientation >= 5;
+    let (w, h) = (image.width, image.height);
+    let (tw, th) = if swap {
+        let (tw, th) = target(h, w, options, true);
+        (th, tw)
+    } else {
+        target(w, h, options, true)
+    };
+    let image = if (tw, th) == (w, h) {
+        image
+    } else {
+        resize(&image, tw, th)
+    };
+    orient(image, orientation)
+}
 
 /// The size for an image of `width` × `height` px under `options`: shrunk to fit every limit,
 /// never enlarged when `raster`. Vector input with no limit keeps its own size.
@@ -51,6 +70,41 @@ pub fn resize(image: &Image, width: u32, height: u32) -> Image {
         height,
         layout: image.layout,
         data: out.into_vec(),
+    }
+}
+
+/// Applies EXIF orientation 2–8 to the pixels; 1 and unknown values leave them as they are.
+pub fn orient(image: Image, orientation: u8) -> Image {
+    if !(2..=8).contains(&orientation) {
+        return image;
+    }
+    let (w, h, n) = (
+        image.width as usize,
+        image.height as usize,
+        image.layout.channels(),
+    );
+    let (ow, oh) = if orientation >= 5 { (h, w) } else { (w, h) };
+    let mut data = Vec::with_capacity(image.data.len());
+    for y in 0..oh {
+        for x in 0..ow {
+            let (sx, sy) = match orientation {
+                2 => (w - 1 - x, y),
+                3 => (w - 1 - x, h - 1 - y),
+                4 => (x, h - 1 - y),
+                5 => (y, x),
+                6 => (y, h - 1 - x),
+                7 => (w - 1 - y, h - 1 - x),
+                _ => (w - 1 - y, x),
+            };
+            let at = (sy * w + sx) * n;
+            data.extend_from_slice(&image.data[at..at + n]);
+        }
+    }
+    Image {
+        width: ow as u32,
+        height: oh as u32,
+        data,
+        ..image
     }
 }
 
