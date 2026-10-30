@@ -117,13 +117,34 @@ fn through_profile(
 ) -> Result<(Option<String>, Converted), String> {
     let source = ColorProfile::new_from_slice(icc).map_err(|e| lower_first(&e.to_string()))?;
     let name = source.description.as_ref().and_then(text);
-    if source.color_space == DataColorSpace::Rgb
-        && layout != Layout::Cmyk
-        && name.as_deref().is_some_and(|n| n.contains("sRGB"))
-    {
+    if source.color_space == DataColorSpace::Rgb && layout != Layout::Cmyk && is_srgb(&name) {
         return Ok((name, None));
     }
     Ok((name, Some(transform(&source, layout, samples)?)))
+}
+
+fn is_srgb(name: &Option<String>) -> bool {
+    name.as_deref().is_some_and(|n| n.contains("sRGB"))
+}
+
+/// How results name a source's colour that the OS decoder has already converted to sRGB.
+pub fn describe(colour: Option<&Colour>) -> Color {
+    let (srgb, profile) = match colour {
+        None => (true, None),
+        Some(Colour::Converted(reported)) => return reported.clone(),
+        Some(Colour::Icc(icc)) => {
+            let source = ColorProfile::new_from_slice(icc).ok();
+            let name = source.and_then(|s| s.description.as_ref().and_then(text));
+            (is_srgb(&name), name)
+        }
+        Some(Colour::Cicp(cicp)) => match cicp_profile(*cicp) {
+            Ok(None) => (true, None),
+            Ok(Some((_, name, _))) => (false, Some(name.into())),
+            Err(_) => (false, None),
+        },
+    };
+    let kind = if srgb { "srgb" } else { "converted" };
+    Color { kind, profile }
 }
 
 /// The profile CICP code points stand for, its name and whether it is HDR (PQ or HLG); `None`
@@ -507,5 +528,22 @@ mod tests {
                 reported
             )
         );
+    }
+
+    #[test]
+    fn colour_converted_elsewhere_is_named_as_to_srgb_would() {
+        let p3 = ColorProfile::new_display_p3().encode().unwrap();
+        let srgb = ColorProfile::new_srgb().encode().unwrap();
+        for (colour, kind, profile) in [
+            (None, "srgb", None),
+            (Some(Colour::Icc(p3)), "converted", Some("Display P3")),
+            (Some(Colour::Icc(srgb)), "srgb", Some("sRGB IEC61966-2.1")),
+            (cicp(12, 13), "converted", Some("Display P3")),
+            (cicp(1, 13), "srgb", None),
+            (cicp(5, 13), "converted", None),
+        ] {
+            let color = describe(colour.as_ref());
+            assert_eq!((color.kind, color.profile.as_deref()), (kind, profile));
+        }
     }
 }

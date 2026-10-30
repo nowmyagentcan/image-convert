@@ -1,6 +1,8 @@
 //! The operating system's decoders: HEIC and AVIF through WIC (Windows), ImageIO (macOS) or the
 //! system's libheif (Linux), and EMF/WMF through GDI+ on Windows only.
 
+#[cfg(target_os = "macos")]
+mod imageio;
 #[cfg(windows)]
 mod wic;
 
@@ -9,6 +11,8 @@ use crate::bmff::Heif;
 use crate::detect::Kind;
 use crate::error::{Error, Warning};
 
+#[cfg(target_os = "macos")]
+use imageio as heif_os;
 #[cfg(windows)]
 use wic as heif_os;
 
@@ -21,18 +25,16 @@ pub const HEIF_DECODER: &str = "imageio";
 pub const HEIF_DECODER: &str = "libheif";
 
 /// Elsewhere, for now, nothing decodes HEIF.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 mod heif_os {
     use super::*;
     use crate::error::Codec;
 
     pub fn check(kind: Kind) -> Result<(), Error> {
-        let codec = if cfg!(target_os = "macos") {
-            Codec::MacOs
-        } else {
-            Codec::LinuxNoLibheif
-        };
-        Err(Error::codec_missing(codec, kind == Kind::Heic))
+        Err(Error::codec_missing(
+            Codec::LinuxNoLibheif,
+            kind == Kind::Heic,
+        ))
     }
 
     pub fn decode(_: &[u8], heif: &Heif) -> Result<Pixels, Error> {
