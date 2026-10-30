@@ -1,7 +1,8 @@
-//! The command line: `image-convert [convert] <PATH>... [OPTIONS]`, `image-convert formats`, and
-//! interactive mode when started with no arguments in a terminal.
+//! The command line: `image-convert [convert] <PATH>... [OPTIONS]`, `image-convert formats`,
+//! `image-convert mcp`, and interactive mode when started with no arguments in a terminal.
 
 mod interactive;
+mod mcp;
 mod text;
 
 use std::ffi::OsString;
@@ -25,6 +26,7 @@ const HELP: &str = "\
 Commands:
   convert  Convert files and folders (the default command)
   formats  Show which formats this machine can decode
+  mcp      Run the MCP server on stdio
 
 Options:
 {options}{after-help}";
@@ -74,6 +76,16 @@ struct Formats {
     #[arg(long)]
     json: bool,
 }
+
+/// `image-convert mcp`
+#[derive(Parser)]
+#[command(
+    name = "image-convert mcp",
+    about = "Run the MCP server on stdio.",
+    after_help = EXAMPLES,
+    disable_version_flag = true
+)]
+struct Mcp {}
 
 #[derive(Parser, Default)]
 #[command(
@@ -206,6 +218,10 @@ fn main() -> ExitCode {
             let mut out = Out::new(io::stdout().lock(), Look::stdout());
             return finish(formats(cli.json, &mut out).map(|()| 0));
         }
+        Some("mcp") => {
+            Mcp::parse_from(&args[1..]);
+            return served(mcp::serve());
+        }
         _ => {}
     }
     if args.len() == 1 && io::stdin().is_terminal() && io::stdout().is_terminal() {
@@ -315,6 +331,11 @@ fn convert(
     }
     out.w.flush()?;
     Ok(report.exit_code())
+}
+
+/// How a server command ended: quietly, or with its error on stderr.
+fn served(result: Result<(), Error>) -> ExitCode {
+    result.map_or_else(|e| fail(&e, false), |()| ExitCode::SUCCESS)
 }
 
 /// One `formats --json` row.

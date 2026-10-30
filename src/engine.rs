@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::detect::{Kind, detect};
@@ -24,11 +25,11 @@ use crate::{Options, Pixels, bmff, color, jpeg, jxl, os, raster, raw, render, sv
 const WORKER: &str = "converter";
 const WORKER_STACK: usize = 64 << 20;
 
-/// What converting one file gave: one entry of the JSON `files` list (spec §2.5).
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+/// What converting one file gave: one entry of the JSON `files` list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, JsonSchema)]
 pub struct FileResult {
     pub input: String,
-    /// The path written, `-` for stdout; `None` when nothing was written.
+    /// The path written, `-` for stdout; null when nothing was written.
     pub output: Option<String>,
     pub input_format: Option<String>,
     pub source: Option<Source>,
@@ -47,7 +48,7 @@ pub struct FileResult {
 }
 
 /// The decoded source, as stored (before orientation).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct Source {
     pub width: u32,
     pub height: u32,
@@ -61,7 +62,7 @@ pub struct Source {
 }
 
 /// The JSON result of a run: every file, the files written and the files that failed.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct Report<'a> {
     pub files: &'a [FileResult],
     pub converted: usize,

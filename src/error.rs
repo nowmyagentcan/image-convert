@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::fmt::Display;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 const SUPPORTED: &str = "Supported: PNG, JPEG, GIF, BMP, ICO, WebP, TIFF, JPEG XL, HEIC/HEIF, AVIF, SVG, EMF/WMF (Windows), and RAW from Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, Fujifilm (RAF), Panasonic (RW2) and Pentax (PEF).";
@@ -12,7 +13,7 @@ const APT_HEVC: &str = "Ubuntu/Debian: sudo apt install libheif1 libheif-plugin-
 const APT_AV1: &str = "Ubuntu/Debian: sudo apt install libheif1 libheif-plugin-dav1d · Fedora: sudo dnf install libheif · Arch: sudo pacman -S libheif";
 
 /// A file, usage or runtime error: a stable `code`, a sentence for people and an optional fix.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Error {
     pub code: &'static str,
     pub message: String,
@@ -23,7 +24,7 @@ pub struct Error {
 }
 
 /// Something worth knowing about a file that still converted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Warning {
     pub code: &'static str,
     pub message: String,

@@ -8,6 +8,7 @@ repository = "https://github.com/nowmyagentcan/image-convert"
 publish = false
 
 [dependencies]
+base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 fast_image_resize = "6.1.0"
 flate2 = "1.1.10"
@@ -15,10 +16,13 @@ image = { version = "0.25.10", default-features = false, features = ["png", "gif
 jpeg-encoder = { version = "0.7.1", features = ["simd"] }
 jxl-oxide = { version = "0.12.6", default-features = false, features = ["moxcms"] }
 moxcms = "0.9.1"
+rmcp = { version = "3.8.0", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
 resvg = { version = "0.49.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tiff = "0.11.3"
+tokio = { version = "1.54.1", features = ["rt"] }
 zune-jpeg = "0.5.15"
 
 [target.'cfg(windows)'.dependencies]

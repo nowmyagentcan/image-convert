@@ -962,7 +962,7 @@ fn svg_refuses_nested_entities_and_utf16_quickly() {
 #[test]
 fn svg_draws_data_images_and_skips_every_other_link() {
     let red = png(1, 1, Png::Rgb, BitDepth::Eight, &[255, 0, 0], |_| {});
-    let b64 = base64(&red);
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &red);
     let doc = format!(
         "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' width='10' height='10'>
         <image width='10' height='10' href='data:image/png;base64,{b64}'/>

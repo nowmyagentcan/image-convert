@@ -74,6 +74,11 @@ pub fn expand(paths: &[PathBuf], recursive: bool, skip: Option<&Path>) -> Vec<In
     inputs
 }
 
+/// One path read as a file, never as a folder or stream (see [`Input::file_only`]).
+pub fn file(path: PathBuf) -> Input {
+    Input::new(path, None, None).file_only()
+}
+
 /// Walks with a stack of open listings rather than recursion, so no folder tree is too deep.
 fn folder(root: &Path, recursive: bool, skip: Option<&Path>, inputs: &mut Vec<Input>) {
     let mut open = vec![list(root, root, inputs)];
@@ -127,6 +132,17 @@ impl Input {
             folder,
             error,
         }
+    }
+
+    /// This input, made `unreadable` unless it is a regular file or missing (which `load`
+    /// reports): a server whose stdin carries its messages can't read `-`, and pipes and
+    /// devices could block it.
+    pub fn file_only(mut self) -> Self {
+        let regular = fs::metadata(&self.path).map_or(true, |m| m.is_file());
+        if self.error.is_none() && (self.path.as_os_str() == "-" || !regular) {
+            self.error = Some(Error::unreadable(&self.name(), "it isn't a regular file"));
+        }
+        self
     }
 
     /// The path as results show it (non-UTF-8 parts as U+FFFD).

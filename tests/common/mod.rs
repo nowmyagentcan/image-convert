@@ -301,27 +301,6 @@ where
     out.into_inner()
 }
 
-/// Standard base64 with padding, for `data:` URLs.
-pub fn base64(data: &[u8]) -> String {
-    const ABC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
-        for i in 0..4 {
-            let c = if i <= chunk.len() {
-                ABC[(n >> (18 - 6 * i) & 63) as usize]
-            } else {
-                b'='
-            };
-            out.push(c as char);
-        }
-    }
-    out
-}
-
 /// An ISO-BMFF box.
 pub fn bx(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
     let mut out = ((8 + body.len()) as u32).to_be_bytes().to_vec();
