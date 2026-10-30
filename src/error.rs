@@ -81,6 +81,11 @@ fn w(code: &'static str, message: impl Into<String>) -> Warning {
 }
 
 impl Error {
+    /// An error a server answers a request with (`bad_request`, `forbidden`…), with no hint.
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        e(code, message, None)
+    }
+
     /// The JSON for an error that stops a run: `{"error": {"code", "message", "hint"}}`.
     pub fn to_json(&self) -> String {
         serde_json::json!({ "error": self }).to_string()

@@ -1,9 +1,10 @@
 //! The command line: `image-convert [convert] <PATH>... [OPTIONS]`, `image-convert formats`,
-//! `image-convert mcp`, and interactive mode when started with no arguments in a terminal.
+//! `image-convert ui`, `image-convert mcp`, and interactive mode when started with no arguments in a terminal.
 
 mod interactive;
 mod mcp;
 mod text;
+mod ui;
 
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
@@ -26,6 +27,7 @@ const HELP: &str = "\
 Commands:
   convert  Convert files and folders (the default command)
   formats  Show which formats this machine can decode
+  ui       Open the local web page
   mcp      Run the MCP server on stdio
 
 Options:
@@ -75,6 +77,23 @@ struct Formats {
     /// print one JSON object
     #[arg(long)]
     json: bool,
+}
+
+/// `image-convert ui`
+#[derive(Parser)]
+#[command(
+    name = "image-convert ui",
+    about = "Open the local web page.",
+    after_help = EXAMPLES,
+    disable_version_flag = true
+)]
+struct Ui {
+    /// port to listen on [default: a free one]
+    #[arg(long, value_name = "N", default_value_t = 0, hide_default_value = true)]
+    port: u16,
+    /// don't open the browser
+    #[arg(long)]
+    no_open: bool,
 }
 
 /// `image-convert mcp`
@@ -217,6 +236,10 @@ fn main() -> ExitCode {
             let cli = Formats::parse_from(&args[1..]);
             let mut out = Out::new(io::stdout().lock(), Look::stdout());
             return finish(formats(cli.json, &mut out).map(|()| 0));
+        }
+        Some("ui") => {
+            let ui = Ui::parse_from(&args[1..]);
+            return served(ui::serve(ui.port, !ui.no_open, "  (Ctrl+C to stop)"));
         }
         Some("mcp") => {
             Mcp::parse_from(&args[1..]);

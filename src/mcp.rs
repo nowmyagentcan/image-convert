@@ -131,10 +131,7 @@ fn answer(result: Result<CallToolResult, Error>) -> CallToolResult {
 }
 
 fn bad_argument(message: String) -> Error {
-    Error {
-        hint: None,
-        ..Error::usage(message)
-    }
+    Error::new("usage", message)
 }
 
 /// A number argument as the text option checks take.
