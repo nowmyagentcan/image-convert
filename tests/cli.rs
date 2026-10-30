@@ -729,7 +729,8 @@ fn formats_lists_every_matrix_row_in_text_and_json() {
     assert_eq!(lines[11], emf);
 }
 
-#[cfg(unix)]
+// Linux only: APFS refuses names that aren't UTF-8, and Windows names are UTF-16.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_path_that_is_not_utf8_prints_lossily() {
     use std::os::unix::ffi::OsStrExt;
