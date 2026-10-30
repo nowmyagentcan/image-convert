@@ -6,6 +6,7 @@ pub mod detect;
 pub mod error;
 pub mod jpeg;
 pub mod raster;
+pub mod resize;
 pub mod webp;
 
 use error::{Error, Warning};
@@ -70,6 +71,43 @@ pub struct Image {
     pub height: u32,
     pub layout: Layout,
     pub data: Vec<u8>,
+}
+
+/// A size preset (spec §2.6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Fit {
+    #[default]
+    None,
+    Vision,
+    VisionHd,
+}
+
+/// How to convert; limits left at `None` take the preset's value, or none.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Options {
+    pub fit: Fit,
+    pub max_side: Option<u32>,
+    pub max_megapixels: Option<f64>,
+    pub max_bytes: Option<u64>,
+    /// The box to fit inside: raster shrinks into it, vector is drawn to fill it.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+impl Options {
+    /// The longest side, megapixels and bytes allowed: explicit values over the preset's.
+    pub fn limits(&self) -> (Option<u32>, Option<f64>, Option<u64>) {
+        let (side, megapixels, bytes) = match self.fit {
+            Fit::None => (None, None, None),
+            Fit::Vision => (Some(1568), Some(1.15), Some(3_750_000)),
+            Fit::VisionHd => (Some(2048), Some(2.4), Some(7_500_000)),
+        };
+        (
+            self.max_side.or(side),
+            self.max_megapixels.or(megapixels),
+            self.max_bytes.or(bytes),
+        )
+    }
 }
 
 /// Refuses a header size of 0, or over 65,535 px per side or 200 megapixels, before decoding.
