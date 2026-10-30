@@ -15,7 +15,7 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 /// Decodes a PNG, GIF, BMP, ICO or WebP file: its default image, first frame or largest icon.
 pub fn decode(data: &[u8], kind: Kind) -> Result<Pixels, Error> {
-    let label = kind.label();
+    let label = &kind.label();
     let ico;
     let (data, width, height, frames) = match kind {
         Kind::Ico => {
@@ -114,7 +114,7 @@ fn failure(kind: Kind, err: ImageError) -> Error {
             }
             _ => Error::unsupported_variant("BMP", e),
         },
-        err => Error::corrupt(kind.label(), root_cause(&err)),
+        err => Error::corrupt(&kind.label(), root_cause(&err)),
     }
 }
 

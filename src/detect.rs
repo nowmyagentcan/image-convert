@@ -32,61 +32,18 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// The `input_format` value in results.
-    pub fn name(self) -> &'static str {
-        use Kind::*;
-        match self {
-            Png => "png",
-            Jpeg => "jpeg",
-            Gif => "gif",
-            Bmp => "bmp",
-            Ico => "ico",
-            Webp => "webp",
-            Tiff => "tiff",
-            Jxl => "jxl",
-            Heic => "heic",
-            Avif => "avif",
-            Svg => "svg",
-            Emf => "emf",
-            Wmf => "wmf",
-            Cr2 => "cr2",
-            Cr3 => "cr3",
-            Nef => "nef",
-            Arw => "arw",
-            Dng => "dng",
-            Raf => "raf",
-            Rw2 => "rw2",
-            Pef => "pef",
-            Gzip => "gzip",
-        }
+    /// The `input_format` value in results: the variant's name in lower case.
+    pub fn name(self) -> String {
+        format!("{self:?}").to_ascii_lowercase()
     }
 
     /// The format's name in messages ("JPEG XL", "WebP").
-    pub fn label(self) -> &'static str {
-        use Kind::*;
+    pub fn label(self) -> String {
         match self {
-            Png => "PNG",
-            Jpeg => "JPEG",
-            Gif => "GIF",
-            Bmp => "BMP",
-            Ico => "ICO",
-            Webp => "WebP",
-            Tiff => "TIFF",
-            Jxl => "JPEG XL",
-            Heic => "HEIF",
-            Avif => "AVIF",
-            Svg => "SVG",
-            Emf => "EMF",
-            Wmf => "WMF",
-            Cr2 => "CR2",
-            Cr3 => "CR3",
-            Nef => "NEF",
-            Arw => "ARW",
-            Dng => "DNG",
-            Raf => "RAF",
-            Rw2 => "RW2",
-            Pef => "PEF",
-            Gzip => "gzip",
+            Kind::Webp => "WebP".into(),
+            Kind::Jxl => "JPEG XL".into(),
+            Kind::Heic => "HEIF".into(),
+            _ => format!("{self:?}").to_ascii_uppercase(),
         }
     }
 }
@@ -531,6 +488,20 @@ mod tests {
             kind(b"\x89PNG\r\n\x1a\n", "x.sr2").unwrap_err().message,
             "Sony SR2 RAW files aren't supported yet."
         );
+    }
+
+    #[test]
+    fn names_and_labels() {
+        let kinds = [Kind::Png, Kind::Webp, Kind::Jxl, Kind::Heic, Kind::Rw2];
+        let names: Vec<_> = kinds.iter().map(|k| (k.name(), k.label())).collect();
+        let expected = [
+            ("png", "PNG"),
+            ("webp", "WebP"),
+            ("jxl", "JPEG XL"),
+            ("heic", "HEIF"),
+            ("rw2", "RW2"),
+        ];
+        assert_eq!(names, expected.map(|(n, l)| (n.to_string(), l.to_string())));
     }
 
     #[test]

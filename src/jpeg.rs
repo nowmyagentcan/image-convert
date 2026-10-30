@@ -11,7 +11,7 @@ use crate::{Layout, Pixels, Samples, check_size, exif_and_orientation};
 /// What the markers before the first scan say about a JPEG.
 #[derive(Debug, PartialEq, Eq)]
 struct Frame {
-    /// The SOF marker's second byte (0xC0 baseline … 0xCF), or 0xF7 for JPEG-LS.
+    /// The SOF marker's second byte, 0xC0 (baseline) to 0xCF.
     marker: u8,
     precision: u8,
     width: u32,
@@ -27,7 +27,6 @@ struct Frame {
 pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
     let frame = frame(data)?;
     let refused = match frame.marker {
-        0xf7 => Some("JPEG-LS".to_string()),
         _ if frame.precision != 8 => Some(format!("{}-bit samples", frame.precision)),
         0xc9..=0xcb | 0xcd..=0xcf => Some("arithmetic coding".into()),
         0xc3 | 0xc7 => Some("lossless coding".into()),
@@ -134,17 +133,7 @@ fn frame(data: &[u8]) -> Result<Frame, Error> {
                     adobe: None,
                 });
             }
-            0xf7 => {
-                found.get_or_insert(Frame {
-                    marker,
-                    precision: 8,
-                    height: 1,
-                    width: 1,
-                    components: 1,
-                    sampling: (1, 1),
-                    adobe: None,
-                });
-            }
+            0xf7 => return Err(Error::unsupported_variant("JPEG", "JPEG-LS")),
             0xee if data.get(body..body + 5) == Some(b"Adobe") => adobe = Some(byte(body + 11)?),
             _ => {}
         }
