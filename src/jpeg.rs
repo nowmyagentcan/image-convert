@@ -17,6 +17,8 @@ struct Frame {
     width: u32,
     height: u32,
     components: u8,
+    /// The largest horizontal and vertical sampling factors of any component.
+    sampling: (u8, u8),
     /// The Adobe APP14 colour transform, when that segment is present.
     adobe: Option<u8>,
 }
@@ -32,6 +34,13 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         0xc5 | 0xc6 => Some("hierarchical coding".into()),
         _ if frame.components == 2 || frame.components > 4 => {
             Some(format!("{} colour components", frame.components))
+        }
+        // zune-jpeg 0.5.15 decodes these to wrong colours (fixed in its 0.5.16 pre-releases).
+        _ if frame.components > 1
+            && !matches!(frame.sampling, (1, 1) | (2, 1) | (1, 2) | (2, 2) | (4, 1)) =>
+        {
+            let (h, v) = frame.sampling;
+            Some(format!("{h}×{v} sampling factors"))
         }
         _ => None,
     };
@@ -108,13 +117,20 @@ fn frame(data: &[u8]) -> Result<Frame, Error> {
         }
         let body = at + 4;
         match marker {
-            0xc0..=0xcf if !matches!(marker, 0xc4 | 0xc8 | 0xcc) => {
-                found.get_or_insert(Frame {
+            0xc0..=0xcf if found.is_none() && !matches!(marker, 0xc4 | 0xc8 | 0xcc) => {
+                let components = byte(body + 5)?;
+                let mut sampling = (0, 0);
+                for i in 0..usize::from(components) {
+                    let factors = byte(body + 7 + 3 * i)?;
+                    sampling = (sampling.0.max(factors >> 4), sampling.1.max(factors & 15));
+                }
+                found = Some(Frame {
                     marker,
                     precision: byte(body)?,
                     height: word(body + 1)?.into(),
                     width: word(body + 3)?.into(),
-                    components: byte(body + 5)?,
+                    components,
+                    sampling,
                     adobe: None,
                 });
             }
@@ -125,6 +141,7 @@ fn frame(data: &[u8]) -> Result<Frame, Error> {
                     height: 1,
                     width: 1,
                     components: 1,
+                    sampling: (1, 1),
                     adobe: None,
                 });
             }
@@ -184,6 +201,7 @@ mod tests {
             width: 3,
             height: 2,
             components: 1,
+            sampling: (1, 1),
             adobe: None,
         };
         assert_eq!(frame, expected);
@@ -212,6 +230,13 @@ mod tests {
             let err = decode(&data).unwrap_err();
             assert_eq!(err.message, format!("JPEG with {variant} isn't supported."));
         }
+        let mut odd = rgb.clone();
+        odd[at + 11] = 0x42;
+        let err = decode(&odd).unwrap_err();
+        assert_eq!(
+            err.message,
+            "JPEG with 4×2 sampling factors isn't supported."
+        );
         let mut extended = rgb.clone();
         extended[at + 1] = 0xc1;
         assert_eq!(decode(&extended).unwrap().layout, Layout::Rgb);
