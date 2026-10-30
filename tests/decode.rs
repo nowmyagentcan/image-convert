@@ -1697,6 +1697,8 @@ fn heif_state_matches_the_installed_packages() {
                 "{name} needs the system's libheif library, which isn't installed."
             )),
             "old" => Some("The system's libheif 1.12 is too old; 1.13 or newer is needed.".into()),
+            // Ubuntu 24.04's libheif1 decodes AV1 through libaom by itself; HEVC is a plugin.
+            "no-plugin" if kind == Kind::Avif => None,
             "no-plugin" => Some(format!("The system's libheif has no {codec} decoder.")),
             "all" => None,
             other => panic!("unknown IMAGE_CONVERT_TEST_HEIF: {other}"),
