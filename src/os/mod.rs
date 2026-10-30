@@ -65,3 +65,43 @@ pub fn render_metafile(
         Err(Error::unsupported_on_platform())
     }
 }
+
+/// One row of `image-convert formats`: a §2.2 format, the decoder that reads it here, and why it
+/// can't when it can't.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatStatus {
+    pub format: Kind,
+    pub decoder: &'static str,
+    /// `codec_missing` or `unsupported_on_platform`, with its message and hint.
+    pub missing: Option<Error>,
+}
+
+impl FormatStatus {
+    /// `available`, `missing` or `unsupported_on_platform`.
+    pub fn status(&self) -> &'static str {
+        match &self.missing {
+            None => "available",
+            Some(e) if e.code == "unsupported_on_platform" => e.code,
+            Some(_) => "missing",
+        }
+    }
+}
+
+/// Every format of the input matrix in its order, probed on this machine.
+pub fn formats() -> Vec<FormatStatus> {
+    use Kind::*;
+    let row = |format, decoder, missing| FormatStatus {
+        format,
+        decoder,
+        missing,
+    };
+    let mut rows: Vec<_> = [Png, Jpeg, Gif, Bmp, Ico, Webp, Tiff, Jxl]
+        .map(|kind| row(kind, "builtin", None))
+        .into();
+    rows.extend([Heic, Avif].map(|kind| row(kind, HEIF_DECODER, heif_available(kind).err())));
+    rows.push(row(Svg, "builtin", None));
+    let metafiles = (!cfg!(windows)).then(Error::unsupported_on_platform);
+    rows.extend([Emf, Wmf].map(|kind| row(kind, "gdiplus", metafiles.clone())));
+    rows.extend([Cr2, Cr3, Nef, Arw, Dng, Raf, Rw2, Pef].map(|kind| row(kind, "preview", None)));
+    rows
+}

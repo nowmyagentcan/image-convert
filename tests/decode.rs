@@ -1643,3 +1643,44 @@ fn metafiles_render_on_windows_only() {
         assert_eq!(sized.unwrap_err().code, "unsupported_on_platform");
     }
 }
+
+#[test]
+fn formats_lists_the_matrix_in_order_as_this_machine_decodes_it() {
+    use image_convert::os::{HEIF_DECODER, formats, heif_available};
+    let rows = formats();
+    let names: Vec<_> = rows.iter().map(|r| r.format.name()).collect();
+    let matrix =
+        "png jpeg gif bmp ico webp tiff jxl heic avif svg emf wmf cr2 cr3 nef arw dng raf rw2 pef";
+    assert_eq!(names.join(" "), matrix);
+    let windows_only = (!cfg!(windows)).then(Error::unsupported_on_platform);
+    for row in &rows {
+        // What this runner has, in the CI log (with --nocapture).
+        let why = row.missing.as_ref().map_or("", |e| e.message.as_str());
+        eprintln!("{:<5} {:<23} {why}", row.format.name(), row.status());
+        let (decoder, missing) = match row.format {
+            Kind::Heic | Kind::Avif => (HEIF_DECODER, heif_available(row.format).err()),
+            Kind::Emf | Kind::Wmf => ("gdiplus", windows_only.clone()),
+            Kind::Cr2
+            | Kind::Cr3
+            | Kind::Nef
+            | Kind::Arw
+            | Kind::Dng
+            | Kind::Raf
+            | Kind::Rw2
+            | Kind::Pef => ("preview", None),
+            _ => ("builtin", None),
+        };
+        assert_eq!(
+            (row.decoder, &row.missing),
+            (decoder, &missing),
+            "{}",
+            row.format.name()
+        );
+        let status = match &missing {
+            None => "available",
+            Some(e) if e.code == "codec_missing" => "missing",
+            Some(_) => "unsupported_on_platform",
+        };
+        assert_eq!(row.status(), status);
+    }
+}
