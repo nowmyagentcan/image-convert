@@ -207,6 +207,33 @@ fn adobe_rgb_and_swop_cmyk_match_lcms2() {
 }
 
 #[test]
+fn heif_colour_matches_its_reference() {
+    let rgb =
+        |data: Vec<u8>| -> Vec<u8> { data.chunks(4).flat_map(|p| &p[..3]).copied().collect() };
+    let cases = [
+        ("heif-p3.avif", "Display P3", p3_patches().1),
+        (
+            "heif-adobergb.heic",
+            "Compatible with Adobe RGB (1998)",
+            srgb(&fixture("color-adobergb-srgb.png")).data,
+        ),
+    ];
+    for (name, profile, expected) in cases {
+        let Some(mut px) = os_heif(name) else {
+            continue;
+        };
+        let (image, color) = to_srgb(&mut px);
+        assert_eq!(
+            (color.kind, color.profile.as_deref()),
+            ("converted", Some(profile)),
+            "{name}"
+        );
+        let worst = worst_delta_e(&rgb(image.data), &expected);
+        assert!(worst <= 2.0, "{name}: ΔE2000 {worst}");
+    }
+}
+
+#[test]
 fn adobe_rgb_tiff_matches_lcms2() {
     use tiff::encoder::{Compression, colortype::RGB8};
     let mut png = decode(&fixture("color-adobergb.png"));

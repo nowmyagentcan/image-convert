@@ -1085,6 +1085,7 @@ fn bmff_reads_the_primary_item_and_its_properties() {
         rotation: 1,
         mirror: Some(0),
         alpha: true,
+        bits: 8,
         exif: Some(exif_orientation(6)),
         sequence: false,
     };
@@ -1488,5 +1489,76 @@ fn tiff_from_libtiff_and_imagemagick_match_their_references() {
         assert_eq!(reference.layout, layout, "{file}'s reference");
         let diff = mean_diff(&eight(&px), &eight(&reference));
         assert!(diff <= max, "{file}: mean difference {diff}");
+    }
+}
+
+/// The decoded image made upright, as 8-bit sRGB.
+fn upright(mut px: Pixels) -> image_convert::Image {
+    let orientation = px.orientation;
+    image_convert::resize::orient(image_convert::color::to_srgb(&mut px).0, orientation)
+}
+
+#[test]
+fn heif_irot_is_applied_once_and_exif_orientation_ignored() {
+    let reference = raster::decode(&fixture("heif-irot-ref.png"), Kind::Png).unwrap();
+    let Samples::U8(expected) = reference.samples else {
+        unreachable!()
+    };
+    for name in ["heif-irot.heic", "heif-irot.avif"] {
+        let Some(px) = os_heif(name) else { continue };
+        let exif = px.exif.as_deref().unwrap();
+        let orientation = image::metadata::Orientation::from_exif_chunk(exif).unwrap();
+        assert_eq!((orientation.to_exif(), px.bit_depth), (6, 8), "{name}");
+        let image = upright(px);
+        assert_eq!((image.width, image.height), (64, 128), "{name}");
+        let rgb: Vec<u8> = match image.layout {
+            Layout::Rgba => image
+                .data
+                .chunks(4)
+                .flat_map(|p| &p[..3])
+                .copied()
+                .collect(),
+            _ => image.data,
+        };
+        let diff = mean_diff(&rgb, &expected);
+        assert!(diff <= 1.0, "{name}: mean difference {diff}");
+    }
+}
+
+#[test]
+fn heif_alpha_and_ten_bit_samples_come_through() {
+    if let Some(px) = os_heif("heif-alpha.avif") {
+        assert!(px.warnings.is_empty(), "{:?}", px.warnings);
+        let expected = raster::decode(&fixture("heif-alpha.png"), Kind::Png).unwrap();
+        let Samples::U8(expected) = expected.samples else {
+            unreachable!()
+        };
+        let image = upright(px);
+        assert_eq!(
+            (image.width, image.height, image.layout),
+            (40, 30, Layout::Rgba)
+        );
+        let diff = mean_diff(&image.data, &expected);
+        assert!(diff <= 1.0, "mean difference {diff}");
+    }
+    if let Some(px) = os_heif("heif-10bit.avif") {
+        assert_eq!(px.bit_depth, 10);
+        let expected = raster::decode(&fixture("heif-10bit.png"), Kind::Png).unwrap();
+        let Samples::U16(expected) = expected.samples else {
+            unreachable!()
+        };
+        let expected: Vec<u8> = expected
+            .iter()
+            .map(|&v| ((u32::from(v) + 128) / 257) as u8)
+            .collect();
+        let image = upright(px);
+        let rgb: Vec<u8> = image
+            .data
+            .chunks(4)
+            .flat_map(|p| &p[..3])
+            .copied()
+            .collect();
+        let diff = mean_diff(&rgb, &expected);
+        assert!(diff <= 1.0, "mean difference {diff}");
     }
 }

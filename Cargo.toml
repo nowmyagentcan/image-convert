@@ -18,6 +18,9 @@ resvg = { version = "0.49.0", default-features = false, features = ["text", "sys
 tiff = "0.11.3"
 zune-jpeg = "0.5.15"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_Media_MediaFoundation", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
+
 [profile.dev]
 opt-level = 1
 

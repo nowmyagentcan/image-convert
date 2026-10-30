@@ -36,6 +36,8 @@ pub struct Heif {
     /// `imir`: 0 mirrors left and right, 1 top and bottom.
     pub mirror: Option<u8>,
     pub alpha: bool,
+    /// Bits per sample (`pixi`), 8 when not given.
+    pub bits: u8,
     /// The `Exif` item from its TIFF header on.
     pub exif: Option<Vec<u8>>,
     /// The file also holds an image sequence.
@@ -352,6 +354,10 @@ pub fn heif(data: &[u8], kind: Kind) -> Result<Heif, Error> {
         Some(imir) => Some(r.uint(imir.start, 1)? as u8 & 1),
         None => None,
     };
+    let bits = match property(primary, b"pixi") {
+        Some(pixi) if r.uint(pixi.start + 4, 1)? > 0 => r.uint(pixi.start + 5, 1)? as u8,
+        _ => 8,
+    };
     let mut alpha = false;
     for &(kind, from, to) in &refs {
         if &kind == b"auxl"
@@ -389,6 +395,7 @@ pub fn heif(data: &[u8], kind: Kind) -> Result<Heif, Error> {
         rotation,
         mirror,
         alpha,
+        bits,
         exif,
         sequence,
     })
@@ -497,7 +504,9 @@ mod tests {
                     rotation,
                     mirror,
                     alpha: false,
+                    bits: 8,
                     exif: None,
+
                     sequence: false,
                 };
                 let once = orient(image.clone(), heif.orientation());

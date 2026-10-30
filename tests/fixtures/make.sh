@@ -93,3 +93,84 @@ convert "jxl-anim.gif[0]" png24:jxl-anim-ref.png
 rm jxl-anim.gif
 # CMYK with alpha: jxl-cmyk.jxl and jxl-cmyk-ref.png are input.jxl and ref.png of the libjxl
 # conformance case testcases/cmyk_layers (github.com/libjxl/conformance, BSD-3-Clause: LICENSE-libjxl).
+
+# HEIC and AVIF from heif-enc 1.17 for the OS decoders, lossless unless named otherwise:
+#   apt install libheif-examples libheif-plugin-x265 libheif-plugin-aomenc
+# heif-irot.*: a JPEG with EXIF orientation 6, which heif-enc turns into irot; the EXIF item's
+# orientation is then set back to 6, so a decoder that also applied it would rotate twice.
+# heif-irot-ref.png is the JPEG's pixels upright. heif-p3.avif holds the Display P3 patches of
+# tests/pipeline.rs under nclx code points 12/13/0; heif-adobergb.heic the Adobe RGB patches
+# with their ICC profile; heif-alpha.avif an alpha gradient; heif-10bit.avif a 16-bit gradient,
+# lossy YCbCr (WIC misreads 10-bit samples under the identity matrix).
+lossless="-L -p chroma=444 --matrix_coefficients=0"
+convert -seed 3 -size 128x64 plasma: -depth 8 ppm:- | cjpeg -quality 100 > heif-src.jpg
+python3 - <<'PY'
+from PIL import Image
+im = Image.open('heif-src.jpg')
+exif = Image.Exif()
+exif[0x0112] = 6
+im.save('heif-o6.jpg', quality=100, subsampling=0, exif=exif.tobytes())
+Image.open('heif-o6.jpg').transpose(Image.Transpose.ROTATE_270).save('heif-irot-ref.png')
+colours = [(r, g, b) for r in (40, 120, 210) for g in (60, 180) for b in (50, 140, 220)]
+p3 = Image.new('RGB', (48, 24))
+for i, c in enumerate(colours):
+    p3.paste(c, (i % 6 * 8, i // 6 * 8, i % 6 * 8 + 8, i // 6 * 8 + 8))
+p3.save('heif-p3.png')
+PY
+heif-enc $lossless heif-o6.jpg -o heif-irot.heic
+heif-enc -A $lossless heif-o6.jpg -o heif-irot.avif
+python3 - <<'PY'
+import struct
+def u32(d, at):
+    return struct.unpack('>I', d[at:at + 4])[0]
+def child(d, start, end, kind):
+    while start < end:
+        if d[start + 4:start + 8] == kind:
+            return start
+        start += u32(d, start)
+    raise KeyError(kind)
+# heif-enc's AV1 path writes no irot, so add one (270 degrees anticlockwise, essential) to item 1
+# and move everything after it, fixing the sizes of its parents and the offsets in iloc.
+d = bytearray(open('heif-irot.avif', 'rb').read())
+meta = child(d, 0, len(d), b'meta')
+iprp = child(d, meta + 12, meta + u32(d, meta), b'iprp')
+ipco = child(d, iprp + 8, iprp + u32(d, iprp), b'ipco')
+ipma = child(d, iprp + 8, iprp + u32(d, iprp), b'ipma')
+iloc = child(d, meta + 12, meta + u32(d, meta), b'iloc')
+assert d[ipma + 8:ipma + 18] == bytes.fromhex('00000000 00000001 0001') and d[iloc + 8:iloc + 14] == bytes.fromhex('00000000 4440')
+assert ipco < ipma
+props, at = 0, ipco + 8
+while at < ipco + u32(d, ipco):
+    props, at = props + 1, at + u32(d, at)
+count = d[ipma + 18]
+d[ipma + 19 + count:ipma + 19 + count] = bytes([0x80 | (props + 1)])
+d[ipma + 18] = count + 1
+d[at:at] = struct.pack('>I', 9) + b'irot' + bytes([3])
+for box, grow in ((meta, 10), (iprp, 10), (ipco, 9), (ipma + 9, 1)):
+    d[box:box + 4] = struct.pack('>I', u32(d, box) + grow)
+at = iloc + 14 + 2
+for _ in range(struct.unpack('>H', d[iloc + 14:iloc + 16])[0]):
+    extents = struct.unpack('>H', d[at + 8:at + 10])[0]
+    for e in range(extents):
+        off = at + 10 + e * 8
+        d[off:off + 4] = struct.pack('>I', u32(d, off) + 10)
+    at += 10 + extents * 8
+open('heif-irot.avif', 'wb').write(d)
+# Sets the EXIF Orientation (IFD0 tag 274) inside each file back to 6.
+for name in ('heif-irot.heic', 'heif-irot.avif'):
+    data = bytearray(open(name, 'rb').read())
+    tag = data.find(b'\x01\x12\x00\x03\x00\x00\x00\x01')
+    if tag < 0:
+        tag = data.find(b'\x12\x01\x03\x00\x01\x00\x00\x00')
+        data[tag + 8:tag + 10] = b'\x06\x00'
+    else:
+        data[tag + 8:tag + 10] = b'\x00\x06'
+    open(name, 'wb').write(data)
+PY
+heif-enc -A $lossless --colour_primaries=12 --transfer_characteristic=13 heif-p3.png -o heif-p3.avif
+heif-enc $lossless color-adobergb.png -o heif-adobergb.heic
+convert tiff-src.png \( +clone -fx 'i/w' -colorspace Gray \) -alpha off -compose CopyOpacity -composite png32:heif-alpha.png
+heif-enc -A $lossless heif-alpha.png -o heif-alpha.avif
+convert -size 64x32 gradient:'#102030-#f0e0d0' -depth 16 png48:heif-10bit.png
+heif-enc -A -q 95 -p chroma=444 -b 10 heif-10bit.png -o heif-10bit.avif
+rm heif-src.jpg heif-o6.jpg heif-p3.png

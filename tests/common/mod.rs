@@ -465,3 +465,24 @@ pub fn raw_tiff(magic: u16, blobs: &[&[u8]], ifd0: &[Entry], subs: &[Vec<Entry>]
     out[4..8].copy_from_slice(&first.to_le_bytes());
     out
 }
+
+/// Decodes a HEIC or AVIF fixture through this machine's OS decoder. When that decoder can't
+/// read the file, checks that decoding fails with exactly the `codec_missing` error the probe
+/// gives, and returns `None`; that is a failure for a format named in the comma-separated
+/// `IMAGE_CONVERT_TEST_REQUIRE` (CI sets it where the decoder must be present).
+pub fn os_heif(name: &str) -> Option<image_convert::Pixels> {
+    use image_convert::{bmff, detect, os};
+    let data = fixture(name);
+    let kind = detect::detect(&data, std::path::Path::new(name)).unwrap();
+    let heif = bmff::heif(&data, kind).unwrap();
+    let required = std::env::var("IMAGE_CONVERT_TEST_REQUIRE")
+        .is_ok_and(|v| v.split(',').any(|f| f == heif.kind.name()));
+    match os::heif_available(heif.kind) {
+        Ok(()) => Some(os::decode_heif(&data, &heif).unwrap()),
+        Err(missing) => {
+            assert!(!required, "{name}: {}", missing.message);
+            assert_eq!(os::decode_heif(&data, &heif), Err(missing));
+            None
+        }
+    }
+}
