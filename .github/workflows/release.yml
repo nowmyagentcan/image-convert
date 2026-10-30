@@ -72,6 +72,10 @@ jobs:
             echo 'Noto Sans Regular 2.015 (the font for SVG text, built in): SIL Open Font License 1.1'
             echo --------------------------------------------------------------------------------; echo
             cat assets/fonts/OFL.txt; } >> THIRD-PARTY-LICENSES.txt
+          for credit in 'Independent JPEG Group License' 'Copyright (c) 2023 Phosphor Icons' \
+            'Copyright 2022 The Noto Project Authors' 'Copyright (c) 2016 Dropbox, Inc.'; do
+            grep -qF "$credit" THIRD-PARTY-LICENSES.txt || { echo "missing: $credit"; exit 1; }
+          done
           mkdir dist
           for t in $(ls bin); do
             n=image-convert-$v-$t

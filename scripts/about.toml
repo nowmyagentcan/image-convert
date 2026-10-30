@@ -1,6 +1,18 @@
 # cargo about generate --locked -c scripts/about.toml scripts/about.hbs -o THIRD-PARTY-LICENSES.txt
-accepted = ["MIT", "Apache-2.0", "Unicode-3.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib", "BSL-1.0", "0BSD", "MIT-0", "CC0-1.0", "Unlicense", "IJG", "Apache-2.0 WITH LLVM-exception"]
+# Apache-2.0 first: the objc2 crates (Zlib, Apache-2.0 or MIT) ship no copyright line to put
+# in the MIT or Zlib text, and no dependency ships a NOTICE file.
+accepted = ["Apache-2.0", "MIT", "Unicode-3.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib", "BSL-1.0", "0BSD", "MIT-0", "CC0-1.0", "Unlicense", "IJG", "Apache-2.0 WITH LLVM-exception"]
 targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
 private = { ignore = true }
+
+# brotli-decompressor (BSD-3-Clause or MIT) ships the BSD-3-Clause text with its copyright line.
+[brotli-decompressor.clarify]
+license = "BSD-3-Clause"
+files = [{ path = "LICENSE", checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae" }]
+
+# alloc-stdlib ships no licence file; its repository's LICENSE (Dropbox, BSD-3-Clause) covers it.
+[alloc-stdlib.clarify]
+license = "BSD-3-Clause"
+git = [{ path = "LICENSE", checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae" }]
