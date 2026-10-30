@@ -22,12 +22,13 @@ pub struct Encoded {
     pub height: u32,
 }
 
-/// Encodes `image` (WebP shrunk to its 16,383 px sides); over a byte limit it then tries, in
-/// order: JPEG or WebP for `--to auto` PNG, quality 75/65/50 when none was given, and sides ×
-/// 0.75 until it fits. At most 12 encodes, else `cannot_fit`.
+/// Encodes `image` with `exif` where the format carries it (WebP shrunk to its 16,383 px sides);
+/// over a byte limit it then tries, in order: JPEG or WebP for `--to auto` PNG, quality 75/65/50
+/// when none was given, and sides × 0.75 until it fits. At most 12 encodes, else `cannot_fit`.
 pub fn fit(
     image: &Image,
     format: Format,
+    exif: Option<&[u8]>,
     options: &Options,
     warnings: &mut Vec<Warning>,
 ) -> Result<Encoded, Error> {
@@ -44,9 +45,9 @@ pub fn fit(
     };
     let attempt = |format, quality, (width, height)| {
         let bytes = if (width, height) == (image.width, image.height) {
-            encode(image, format, quality)
+            encode(image, format, quality, exif)
         } else {
-            encode(&resize(image, width, height), format, quality)
+            encode(&resize(image, width, height), format, quality, exif)
         };
         Encoded {
             bytes,
@@ -111,9 +112,21 @@ pub fn auto(kind: Kind, alpha: bool) -> Format {
     }
 }
 
-/// Encodes 8-bit sRGB pixels at `quality` (JPEG and WebP); JPEG takes only grey or RGB.
-pub fn encode(image: &Image, format: Format, quality: u8) -> Vec<u8> {
+/// Whether `format` carries an EXIF block of `len` bytes: JPEG's APP1 holds 65,527 after its
+/// `Exif\0\0` header, and WebP output never carries one.
+pub fn carries_exif(format: Format, len: usize) -> bool {
+    match format {
+        Format::Png => true,
+        Format::Jpeg => len <= 65_527,
+        Format::Webp => false,
+    }
+}
+
+/// Encodes 8-bit sRGB pixels at `quality` (JPEG and WebP), with `exif` where
+/// [`carries_exif`]; JPEG takes only grey or RGB.
+pub fn encode(image: &Image, format: Format, quality: u8, exif: Option<&[u8]>) -> Vec<u8> {
     let (width, height) = (image.width, image.height);
+    let exif = exif.filter(|e| carries_exif(format, e.len()));
     let mut out = Vec::new();
     match format {
         Format::Png => {
@@ -123,7 +136,17 @@ pub fn encode(image: &Image, format: Format, quality: u8) -> Vec<u8> {
                 ExtendedColorType::Rgb8,
                 ExtendedColorType::Rgba8,
             ][image.layout.channels() - 1];
-            PngEncoder::new_with_quality(&mut out, CompressionType::Default, FilterType::Adaptive)
+            let mut encoder = PngEncoder::new_with_quality(
+                &mut out,
+                CompressionType::Default,
+                FilterType::Adaptive,
+            );
+            if let Some(exif) = exif {
+                encoder
+                    .set_exif_metadata(exif.to_vec())
+                    .expect("PNG takes an eXIf chunk");
+            }
+            encoder
                 .write_image(&image.data, width, height, color)
                 .expect("PNG encodes any 8-bit image into memory");
         }
@@ -137,6 +160,11 @@ pub fn encode(image: &Image, format: Format, quality: u8) -> Vec<u8> {
             let mut encoder = Encoder::new(&mut out, quality);
             encoder.set_optimized_huffman_tables(true);
             encoder.set_chroma_subsampling_method(ChromaSubsamplingMethod::Average);
+            if let Some(exif) = exif {
+                encoder
+                    .add_exif_metadata(exif)
+                    .expect("the block fits one APP1 segment");
+            }
             encoder
                 .encode(&image.data, width as u16, height as u16, color)
                 .expect("JPEG encodes sides up to 65,535 px");

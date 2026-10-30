@@ -715,3 +715,67 @@ fn an_impossible_limit_gives_cannot_fit() {
         err.message
     );
 }
+
+/// A little-endian EXIF block with Orientation and a capture date in IFD0.
+fn exif_with_date(orientation: u16) -> Vec<u8> {
+    let mut exif = b"II*\0\x08\0\0\0\x02\0".to_vec();
+    exif.extend([0x12, 0x01, 3, 0, 1, 0, 0, 0]);
+    exif.extend(orientation.to_le_bytes());
+    exif.extend([0, 0]);
+    exif.extend([0x32, 0x01, 2, 0, 20, 0, 0, 0, 38, 0, 0, 0]);
+    exif.extend([0; 4]);
+    exif.extend(b"2024:05:01 10:00:00\0");
+    exif
+}
+
+#[test]
+fn keep_exif_copies_the_block_with_orientation_one() {
+    let keep = |format| Options {
+        keep_exif: true,
+        ..to(format)
+    };
+    let source = jpeg(30, 20, Jpeg::Rgb, &gradient(30, 20, 3), |e| {
+        e.add_exif_metadata(&exif_with_date(6)).unwrap();
+    });
+    for format in [Format::Jpeg, Format::Png] {
+        let out = convert(&source, &keep(format));
+        assert!(out.exif && out.warnings.is_empty(), "{:?}", out.warnings);
+        let back = decode(&out.bytes);
+        assert_eq!((back.width, back.height, back.orientation), (20, 30, 1));
+        assert_eq!(back.exif, Some(exif_with_date(1)));
+        if format == Format::Png {
+            assert_eq!(chunks(&out.bytes), ["IHDR", "eXIf", "IDAT", "IEND"]);
+        }
+    }
+    assert!(!convert(&source, &to(Format::Jpeg)).exif);
+
+    let mut big = exif_with_date(1);
+    big.resize(65_528, 0);
+    let large = png(
+        4,
+        4,
+        png::ColorType::Rgb,
+        png::BitDepth::Eight,
+        &[7; 48],
+        |info| {
+            info.exif_metadata = Some(big.into());
+        },
+    );
+    assert!(convert(&large, &keep(Format::Png)).exif);
+    let plain = jpeg(8, 8, Jpeg::Rgb, &[9; 192], |_| {});
+    let gif = gif((2, 2), None, &[(0, 0, 2, 2, vec![0, 1, 2, 3])]);
+    for (file, format, reason) in [
+        (&source, Format::Webp, "WebP output doesn't carry it"),
+        (&large, Format::Jpeg, "it is larger than 64 KB"),
+        (&plain, Format::Jpeg, "the source has none"),
+        (&gif, Format::Png, "GIF sources aren't supported"),
+    ] {
+        let out = convert(file, &keep(format));
+        assert!(!out.exif);
+        assert_eq!(codes(&out), ["exif_not_kept"]);
+        assert_eq!(
+            out.warnings[0].message,
+            format!("EXIF wasn't kept: {reason}.")
+        );
+    }
+}

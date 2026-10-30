@@ -11,7 +11,7 @@ pub mod resize;
 pub mod webp;
 
 use detect::Kind;
-use error::{Error, Warning};
+use error::{Error, ExifSkip, Warning};
 
 /// How the samples of one pixel are laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +101,8 @@ pub struct Options {
     pub quality: Option<u8>,
     /// Fills transparency in JPEG output.
     pub background: [u8; 3],
+    /// Copies the source's EXIF into JPEG and PNG output.
+    pub keep_exif: bool,
     pub fit: Fit,
     pub max_side: Option<u32>,
     pub max_megapixels: Option<f64>,
@@ -116,6 +118,7 @@ impl Default for Options {
             to: None,
             quality: None,
             background: [255; 3],
+            keep_exif: false,
             fit: Fit::None,
             max_side: None,
             max_megapixels: None,
@@ -154,6 +157,8 @@ pub struct Output {
     pub quality: Option<u8>,
     /// Whether the size differs from the upright source's.
     pub resized: bool,
+    /// Whether the source's EXIF was written.
+    pub exif: bool,
     pub color: color::Color,
     /// The decoder's warnings, then the pipeline's.
     pub warnings: Vec<Warning>,
@@ -178,7 +183,27 @@ pub fn render(mut px: Pixels, kind: Kind, options: &Options) -> Result<Output, E
         px.warnings
             .push(Warning::transparency_flattened(&background));
     }
-    let out = encode::fit(&image, format, options, &mut px.warnings)?;
+    let exif = options.keep_exif.then(|| match px.exif.as_deref() {
+        _ if !matches!(
+            kind,
+            Kind::Jpeg | Kind::Png | Kind::Webp | Kind::Heic | Kind::Avif
+        ) =>
+        {
+            Err(ExifSkip::Source(kind.label()))
+        }
+        None => Err(ExifSkip::NoneInSource),
+        Some(block) => Ok(upright_exif(block)),
+    });
+    let block = exif.as_ref().and_then(|e| e.as_deref().ok());
+    let out = encode::fit(&image, format, block, options, &mut px.warnings)?;
+    let kept = block.is_some_and(|b| encode::carries_exif(out.format, b.len()));
+    let skipped = match exif {
+        Some(Err(why)) => Some(why),
+        Some(Ok(_)) if !kept && out.format == Format::Webp => Some(ExifSkip::WebpOutput),
+        Some(Ok(_)) if !kept => Some(ExifSkip::TooLarge),
+        _ => None,
+    };
+    px.warnings.extend(skipped.map(Warning::exif_not_kept));
     let upright = if px.orientation >= 5 {
         (px.height, px.width)
     } else {
@@ -191,6 +216,7 @@ pub fn render(mut px: Pixels, kind: Kind, options: &Options) -> Result<Output, E
         width: out.width,
         height: out.height,
         quality: (out.format != Format::Png).then_some(out.quality),
+        exif: kept,
         color,
         warnings: px.warnings,
     })
@@ -225,6 +251,32 @@ fn exif_and_orientation(exif: Option<Vec<u8>>) -> (Option<Vec<u8>>, u8) {
     (exif, orientation)
 }
 
+/// A copy of an EXIF block with its Orientation (IFD0 tag 274) set to 1, as the pixels are
+/// upright now.
+fn upright_exif(exif: &[u8]) -> Vec<u8> {
+    let mut out = exif.to_vec();
+    let big = exif.starts_with(b"MM");
+    let read = |at: usize, len: usize| {
+        let bytes = exif.get(at..at.checked_add(len)?)?;
+        let fold = |acc: usize, &b: &u8| acc << 8 | usize::from(b);
+        Some(if big {
+            bytes.iter().fold(0, fold)
+        } else {
+            bytes.iter().rev().fold(0, fold)
+        })
+    };
+    let Some(ifd) = read(4, 4) else { return out };
+    for entry in (0..read(ifd, 2).unwrap_or(0)).map(|i| ifd + 2 + 12 * i) {
+        if read(entry, 2) == Some(0x112)
+            && read(entry + 2, 2) == Some(3)
+            && let Some(value) = out.get_mut(entry + 8..entry + 10)
+        {
+            value.copy_from_slice(if big { &[0, 1] } else { &[1, 0] });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +306,15 @@ mod tests {
             (b"MM\0*".to_vec(), 6)
         );
         assert_eq!(exif_and_orientation(None), (None, 1));
+    }
+
+    #[test]
+    fn kept_exif_is_made_upright_in_either_byte_order() {
+        let big = b"MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0";
+        let fixed = upright_exif(big);
+        assert_eq!((fixed.len(), &fixed[18..20]), (big.len(), &[0, 1][..]));
+        let little = b"II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x08\0\0\0\0\0";
+        assert_eq!(&upright_exif(little)[18..20], [1, 0]);
+        assert_eq!(upright_exif(b"II*\0\xff\xff\0\0"), b"II*\0\xff\xff\0\0");
     }
 }

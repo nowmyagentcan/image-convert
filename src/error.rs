@@ -36,10 +36,11 @@ pub enum Codec {
 }
 
 /// Why `--keep-exif` couldn't copy the EXIF block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExifSkip {
     NoneInSource,
-    Source(&'static str),
+    /// A source format with no EXIF path, by its label.
+    Source(String),
     WebpOutput,
     TooLarge,
 }
@@ -512,7 +513,7 @@ mod tests {
         );
         assert_eq!(Error::codec_missing(Codec::MacOs, true).hint, None);
         assert_eq!(
-            Warning::exif_not_kept(ExifSkip::Source("TIFF")).message,
+            Warning::exif_not_kept(ExifSkip::Source("TIFF".into())).message,
             "EXIF wasn't kept: TIFF sources aren't supported."
         );
     }
