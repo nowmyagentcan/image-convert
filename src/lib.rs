@@ -5,6 +5,7 @@ pub mod bmff;
 pub mod color;
 pub mod detect;
 pub mod encode;
+pub mod engine;
 pub mod error;
 pub mod jpeg;
 pub mod jxl;
@@ -97,6 +98,17 @@ pub enum Format {
     Png,
     Jpeg,
     Webp,
+}
+
+impl Format {
+    /// The `format` value in results.
+    pub fn name(self) -> &'static str {
+        match self {
+            Format::Png => "png",
+            Format::Jpeg => "jpeg",
+            Format::Webp => "webp",
+        }
+    }
 }
 
 /// How to convert; limits left at `None` take the preset's value, or none.

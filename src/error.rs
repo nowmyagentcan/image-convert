@@ -1,6 +1,9 @@
 //! Error and warning codes with the exact messages and hints that people and agents see.
 
+use std::any::Any;
 use std::fmt::Display;
+
+use serde::Serialize;
 
 const SUPPORTED: &str = "Supported: PNG, JPEG, GIF, BMP, ICO, WebP, TIFF, JPEG XL, HEIC/HEIF, AVIF, SVG, EMF/WMF (Windows), and RAW from Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, Fujifilm (RAF), Panasonic (RW2) and Pentax (PEF).";
 const RAW_EDITOR: &str =
@@ -9,15 +12,18 @@ const APT_HEVC: &str = "Ubuntu/Debian: sudo apt install libheif1 libheif-plugin-
 const APT_AV1: &str = "Ubuntu/Debian: sudo apt install libheif1 libheif-plugin-dav1d · Fedora: sudo dnf install libheif · Arch: sudo pacman -S libheif";
 
 /// A file, usage or runtime error: a stable `code`, a sentence for people and an optional fix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Error {
     pub code: &'static str,
     pub message: String,
     pub hint: Option<&'static str>,
+    /// Shown by `--debug` only: where a caught panic happened.
+    #[serde(skip)]
+    pub cause: Option<String>,
 }
 
 /// Something worth knowing about a file that still converted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Warning {
     pub code: &'static str,
     pub message: String,
@@ -50,6 +56,19 @@ fn e(code: &'static str, message: impl Into<String>, hint: Option<&'static str>)
         code,
         message: message.into(),
         hint,
+        cause: None,
+    }
+}
+
+/// The text a panic was raised with.
+pub fn panic_message(payload: &(dyn Any + Send)) -> String {
+    match (
+        payload.downcast_ref::<&str>(),
+        payload.downcast_ref::<String>(),
+    ) {
+        (Some(s), _) => s.to_string(),
+        (_, Some(s)) => s.clone(),
+        _ => "a panic without a message".into(),
     }
 }
 
@@ -61,6 +80,11 @@ fn w(code: &'static str, message: impl Into<String>) -> Warning {
 }
 
 impl Error {
+    /// The JSON for an error that stops a run: `{"error": {"code", "message", "hint"}}`.
+    pub fn to_json(&self) -> String {
+        serde_json::json!({ "error": self }).to_string()
+    }
+
     /// The process exit code this error forces: 2 for usage, 3 for runtime and internal, else 1.
     pub fn exit_code(&self) -> u8 {
         match self.code {
