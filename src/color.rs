@@ -1,7 +1,10 @@
-//! Colour to sRGB: ICC profiles through moxcms, CMYK without one by the naive formula, and 16-bit
-//! samples down to 8.
+//! Colour to sRGB: ICC profiles and CICP code points through moxcms, CMYK without a profile by the
+//! naive formula, and 16-bit samples down to 8.
 
-use moxcms::{ColorProfile, DataColorSpace, ProfileText, RenderingIntent, TransformOptions};
+use moxcms::{
+    CicpColorPrimaries, CicpProfile, ColorProfile, DataColorSpace, MatrixCoefficients, ProfileText,
+    RenderingIntent, ToneReprCurve, TransferCharacteristics, TransformOptions,
+};
 
 use crate::error::Warning;
 use crate::{Image, Layout, Pixels, Samples};
@@ -15,7 +18,26 @@ pub struct Color {
     pub profile: Option<String>,
 }
 
-/// Takes the samples out of `px` as an 8-bit sRGB image; an unusable profile adds `icc_ignored`.
+/// Colour code points (ITU-T H.273), as a HEIF `nclx` box gives them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cicp {
+    pub primaries: u16,
+    pub transfer: u16,
+    pub matrix: u16,
+    pub full_range: bool,
+}
+
+/// How a source describes its colour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Colour {
+    Icc(Vec<u8>),
+    Cicp(Cicp),
+    /// The decoder gave sRGB samples already; this is how results report the source's colour.
+    Converted(Color),
+}
+
+/// Takes the samples out of `px` as an 8-bit sRGB image; an unusable profile adds `icc_ignored`
+/// and HDR code points `hdr_clipped`.
 pub fn to_srgb(px: &mut Pixels) -> (Image, Color) {
     let mut samples = std::mem::replace(&mut px.samples, Samples::U8(Vec::new()));
     let mut layout = px.layout;
@@ -23,20 +45,36 @@ pub fn to_srgb(px: &mut Pixels) -> (Image, Color) {
         kind: "srgb",
         profile: None,
     };
-    if let Some(icc) = px.icc.take() {
-        match through_profile(&icc, layout, &samples) {
-            Ok((name, None)) => color.profile = name,
-            Ok((name, Some((out, out_layout)))) => {
-                (samples, layout) = (out, out_layout);
-                color = Color {
-                    kind: "converted",
-                    profile: name,
-                };
+    let converted = match px.colour.take() {
+        None => Ok((None, None)),
+        Some(Colour::Converted(reported)) => {
+            color = reported;
+            Ok((None, None))
+        }
+        Some(Colour::Icc(icc)) => through_profile(&icc, layout, &samples),
+        Some(Colour::Cicp(cicp)) => match cicp_profile(cicp) {
+            Ok(Some((source, name, hdr))) => {
+                if hdr {
+                    px.warnings.push(Warning::hdr_clipped());
+                }
+                transform(&source, layout, &samples).map(|out| (Some(name.into()), Some(out)))
             }
-            Err(reason) => {
-                px.warnings.push(Warning::icc_ignored(reason));
-                color.kind = "ignored";
-            }
+            Ok(None) => Ok((None, None)),
+            Err(reason) => Err(reason),
+        },
+    };
+    match converted {
+        Ok((name, None)) => color.profile = color.profile.take().or(name),
+        Ok((name, Some((out, out_layout)))) => {
+            (samples, layout) = (out, out_layout);
+            color = Color {
+                kind: "converted",
+                profile: name,
+            };
+        }
+        Err(reason) => {
+            px.warnings.push(Warning::icc_ignored(reason));
+            color.kind = "ignored";
         }
     }
     let mut data = match samples {
@@ -77,16 +115,89 @@ fn through_profile(
     layout: Layout,
     samples: &Samples,
 ) -> Result<(Option<String>, Converted), String> {
-    use moxcms::Layout as L;
     let source = ColorProfile::new_from_slice(icc).map_err(|e| lower_first(&e.to_string()))?;
     let name = source.description.as_ref().and_then(text);
-    let space = source.color_space;
-    if space == DataColorSpace::Rgb
+    if source.color_space == DataColorSpace::Rgb
         && layout != Layout::Cmyk
         && name.as_deref().is_some_and(|n| n.contains("sRGB"))
     {
         return Ok((name, None));
     }
+    Ok((name, Some(transform(&source, layout, samples)?)))
+}
+
+/// The profile CICP code points stand for, its name and whether it is HDR (PQ or HLG); `None`
+/// for sRGB. Unspecified primaries or transfer (2) read as sRGB's.
+fn cicp_profile(cicp: Cicp) -> Result<Option<(ColorProfile, &'static str, bool)>, String> {
+    let (primaries, name) = match cicp.primaries {
+        1 | 2 => (CicpColorPrimaries::Bt709, "BT.709"),
+        9 => (CicpColorPrimaries::Bt2020, "BT.2020"),
+        12 => (CicpColorPrimaries::Smpte432, "Display P3"),
+        n => return Err(format!("it uses colour primaries {n}")),
+    };
+    let hdr: Option<fn(f64) -> f64> = match cicp.transfer {
+        16 => Some(pq),
+        18 => Some(hlg),
+        _ => None,
+    };
+    let transfer = match cicp.transfer {
+        2 | 13 if primaries == CicpColorPrimaries::Bt709 => return Ok(None),
+        // H.273 calls 6, 14 and 15 functionally the same as 1.
+        1 | 6 | 14 | 15 => TransferCharacteristics::Bt709,
+        2 | 13 | 16 | 18 => TransferCharacteristics::Srgb,
+        n => return Err(format!("it uses transfer characteristics {n}")),
+    };
+    let mut profile = ColorProfile::new_from_cicp(CicpProfile {
+        color_primaries: primaries,
+        transfer_characteristics: transfer,
+        matrix_coefficients: MatrixCoefficients::Bt709,
+        full_range: cicp.full_range,
+    });
+    if let Some(eotf) = hdr {
+        // moxcms prefers the CICP curve to the profile's own, so it goes.
+        profile.cicp = None;
+        let table = (0..4096)
+            .map(|i| (eotf(f64::from(i) / 4095.0).min(1.0) * 65535.0).round() as u16)
+            .collect();
+        let curve = ToneReprCurve::Lut(table);
+        profile.red_trc = Some(curve.clone());
+        profile.green_trc = Some(curve.clone());
+        profile.blue_trc = Some(curve);
+    }
+    Ok(Some((profile, name, hdr.is_some())))
+}
+
+/// HDR is shown with its reference white (203 nits, ITU-R BT.2408) as sRGB white; anything
+/// brighter clips.
+const REFERENCE_WHITE: f64 = 203.0;
+
+/// A PQ (SMPTE ST 2084) signal as linear light relative to reference white.
+fn pq(signal: f64) -> f64 {
+    let p = signal.powf(1.0 / 78.84375);
+    let nits = 10000.0
+        * ((p - 0.8359375).max(0.0) / (18.8515625 - 18.6875 * p)).powf(1.0 / 0.1593017578125);
+    nits / REFERENCE_WHITE
+}
+
+/// An HLG (ARIB STD-B67) signal as linear light relative to reference white, on a 1000-nit
+/// display (system gamma 1.2).
+fn hlg(signal: f64) -> f64 {
+    let scene = if signal <= 0.5 {
+        signal * signal / 3.0
+    } else {
+        (((signal - 0.55991073) / 0.17883277).exp() + 0.28466892) / 12.0
+    };
+    1000.0 * scene.powf(1.2) / REFERENCE_WHITE
+}
+
+/// The samples through `source` to sRGB (grey to grey), with their layout.
+fn transform(
+    source: &ColorProfile,
+    layout: Layout,
+    samples: &Samples,
+) -> Result<(Samples, Layout), String> {
+    use moxcms::Layout as L;
+    let space = source.color_space;
     let srgb = ColorProfile::new_srgb();
     let mut grey = ColorProfile::new_gray_with_gamma(1.0);
     grey.gray_trc = srgb.red_trc.clone();
@@ -141,7 +252,7 @@ fn through_profile(
                 }),
         };
         match converted {
-            Ok(converted) => return Ok((name, Some((converted, out)))),
+            Ok(converted) => return Ok((converted, out)),
             Err(e) => failure = Some(e),
         }
     }
@@ -175,7 +286,7 @@ fn lower_first(s: &str) -> String {
 mod tests {
     use super::*;
 
-    fn pixels(layout: Layout, samples: Samples, icc: Option<Vec<u8>>) -> Pixels {
+    fn pixels(layout: Layout, samples: Samples, colour: Option<Colour>) -> Pixels {
         let n = match &samples {
             Samples::U8(s) => s.len(),
             Samples::U16(s) => s.len(),
@@ -186,7 +297,7 @@ mod tests {
             layout,
             samples,
             bit_depth: 8,
-            icc,
+            colour,
             exif: None,
             orientation: 1,
             frames: 1,
@@ -230,7 +341,7 @@ mod tests {
         let mut px = pixels(
             Layout::GreyAlpha,
             Samples::U8(vec![128, 7, 255, 255]),
-            Some(linear),
+            Some(Colour::Icc(linear)),
         );
         let (image, color) = to_srgb(&mut px);
         assert_eq!(image.layout, Layout::GreyAlpha);
@@ -242,7 +353,11 @@ mod tests {
     #[test]
     fn srgb_profiles_are_kept_and_broken_ones_ignored() {
         let srgb = ColorProfile::new_srgb().encode().unwrap();
-        let mut px = pixels(Layout::Rgb, Samples::U8(vec![1, 2, 3]), Some(srgb.clone()));
+        let mut px = pixels(
+            Layout::Rgb,
+            Samples::U8(vec![1, 2, 3]),
+            Some(Colour::Icc(srgb.clone())),
+        );
         let (image, color) = to_srgb(&mut px);
         assert_eq!(image.data, [1, 2, 3]);
         assert_eq!(
@@ -255,7 +370,7 @@ mod tests {
             (Layout::Cmyk, srgb, "it describes RGB colour, not CMYK"),
         ] {
             let n = layout.channels();
-            let mut px = pixels(layout, Samples::U8(vec![0; n]), Some(icc));
+            let mut px = pixels(layout, Samples::U8(vec![0; n]), Some(Colour::Icc(icc)));
             let (image, color) = to_srgb(&mut px);
             assert_eq!(image.data, [255 * u8::from(layout == Layout::Cmyk); 3]);
             assert_eq!(color.kind, "ignored");
@@ -267,5 +382,130 @@ mod tests {
                 )
             );
         }
+    }
+
+    fn cicp(primaries: u16, transfer: u16) -> Option<Colour> {
+        Some(Colour::Cicp(Cicp {
+            primaries,
+            transfer,
+            matrix: 6,
+            full_range: true,
+        }))
+    }
+
+    #[test]
+    fn srgb_and_unspecified_code_points_change_nothing() {
+        for (primaries, transfer) in [(1, 13), (2, 2), (1, 2), (2, 13)] {
+            let mut px = pixels(
+                Layout::Rgba,
+                Samples::U8(vec![10, 128, 250, 9]),
+                cicp(primaries, transfer),
+            );
+            let (image, color) = to_srgb(&mut px);
+            assert_eq!(image.data, [10, 128, 250, 9]);
+            assert_eq!(
+                (color.kind, color.profile, px.warnings),
+                ("srgb", None, vec![])
+            );
+        }
+    }
+
+    #[test]
+    fn wide_gamut_code_points_are_converted_and_named() {
+        // Pure P3 and BT.2020 red lie outside sRGB, so they clip to sRGB red.
+        for (primaries, transfer, name) in
+            [(12, 13, "Display P3"), (9, 1, "BT.2020"), (1, 6, "BT.709")]
+        {
+            let mut px = pixels(
+                Layout::Rgb,
+                Samples::U8(vec![255, 0, 0, 255, 255, 255]),
+                cicp(primaries, transfer),
+            );
+            let (image, color) = to_srgb(&mut px);
+            assert_eq!(
+                (color.kind, color.profile.as_deref()),
+                ("converted", Some(name))
+            );
+            assert!(
+                image.data[..3]
+                    .iter()
+                    .zip([255, 0, 0])
+                    .all(|(a, b)| a.abs_diff(b) <= 1),
+                "{name}: {:?}",
+                image.data
+            );
+            assert!(
+                image.data[3..].iter().all(|&v| v >= 254),
+                "{name}: {:?}",
+                image.data
+            );
+            assert!(px.warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn hdr_reference_white_becomes_srgb_white_and_brighter_clips() {
+        // 203 nits: PQ signal 0.5806, HLG signal 0.75.
+        for (transfer, white) in [(16, 148), (18, 191)] {
+            let mut px = pixels(
+                Layout::Rgb,
+                Samples::U8(vec![white, white, white, 255, 255, 255, 40, 40, 40]),
+                cicp(9, transfer),
+            );
+            let (image, color) = to_srgb(&mut px);
+            assert_eq!(color.kind, "converted");
+            assert!(
+                image.data[..6].iter().all(|&v| v >= 253),
+                "{transfer}: {:?}",
+                image.data
+            );
+            assert!(image.data[6] < 128, "{transfer}: {:?}", image.data);
+            assert_eq!(px.warnings, [Warning::hdr_clipped()]);
+        }
+    }
+
+    #[test]
+    fn other_code_points_are_ignored_with_the_reason() {
+        for (primaries, transfer, reason) in [
+            (5, 13, "colour primaries 5"),
+            (12, 8, "transfer characteristics 8"),
+        ] {
+            let mut px = pixels(
+                Layout::Rgb,
+                Samples::U8(vec![1, 2, 3]),
+                cicp(primaries, transfer),
+            );
+            let (image, color) = to_srgb(&mut px);
+            assert_eq!((image.data, color.kind), (vec![1, 2, 3], "ignored"));
+            assert_eq!(
+                px.warnings,
+                [Warning::icc_ignored(format!("it uses {reason}"))]
+            );
+        }
+    }
+
+    #[test]
+    fn colour_a_decoder_converted_is_reported_as_given() {
+        let reported = Color {
+            kind: "converted",
+            profile: Some("Display P3".into()),
+        };
+        let mut px = pixels(
+            Layout::Rgb,
+            Samples::U8(vec![1, 2, 3]),
+            Some(Colour::Converted(reported.clone())),
+        );
+        assert_eq!(
+            to_srgb(&mut px),
+            (
+                Image {
+                    width: 1,
+                    height: 1,
+                    layout: Layout::Rgb,
+                    data: vec![1, 2, 3]
+                },
+                reported
+            )
+        );
     }
 }

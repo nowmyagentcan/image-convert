@@ -60,7 +60,7 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         layout,
         samples,
         bit_depth: bits.min(16) as u8,
-        icc: None,
+        colour: None,
         exif: None,
         orientation: 1,
         frames,

@@ -8,6 +8,7 @@ use std::cell::Cell;
 use std::path::Path;
 
 use common::*;
+use image_convert::color::{Cicp, Colour};
 use image_convert::detect::{Kind, detect};
 use image_convert::error::Error;
 use image_convert::{
@@ -178,8 +179,8 @@ fn png_palette_transparency_profile_exif_and_interlace() {
     assert_eq!(rgb(&px), COLORS.to_vec());
     assert_eq!(alpha(&px), [0, 128, 255, 255, 255, 255]);
     assert_eq!(
-        (px.icc, px.exif, px.orientation),
-        (Some(icc), Some(exif_orientation(6)), 6)
+        (px.colour, px.exif, px.orientation),
+        (Some(Colour::Icc(icc)), Some(exif_orientation(6)), 6)
     );
 
     let interlaced = decode(&fixture("png-adam7.png")).unwrap();
@@ -476,8 +477,8 @@ fn webp_lossy_lossless_alpha_metadata_and_animation() {
     ]);
     let px = decode(&file).unwrap();
     assert_eq!(
-        (px.icc, px.exif, px.orientation),
-        (Some(icc), Some(exif_orientation(6)), 6)
+        (px.colour, px.exif, px.orientation),
+        (Some(Colour::Icc(icc)), Some(exif_orientation(6)), 6)
     );
 
     // Two animation frames of 4×3: red, then blue.
@@ -572,8 +573,8 @@ fn jpeg_profile_exif_and_first_of_several_images() {
     });
     let px = decode(&file).unwrap();
     assert_eq!(
-        (px.icc, px.exif, px.orientation),
-        (Some(icc), Some(exif_orientation(6)), 6)
+        (px.colour, px.exif, px.orientation),
+        (Some(Colour::Icc(icc)), Some(exif_orientation(6)), 6)
     );
 
     // MPO and Ultra HDR: the base image comes first.
@@ -798,7 +799,10 @@ fn tiff_orientation_profile_and_pages() {
         1,
     );
     let px = decode(&file).unwrap();
-    assert_eq!((px.orientation, px.icc, px.frames), (6, Some(icc), 1));
+    assert_eq!(
+        (px.orientation, px.colour, px.frames),
+        (6, Some(Colour::Icc(icc)), 1)
+    );
     assert!(px.warnings.is_empty());
     let pages = tiff::<ct::Gray8>(2, 2, &grey, C::Uncompressed, P::None, &[], None, 3);
     let px = decode(&pages).unwrap();
@@ -1072,12 +1076,12 @@ fn bmff_reads_the_primary_item_and_its_properties() {
         kind: Kind::Heic,
         width: 4032,
         height: 3024,
-        colour: Some(bmff::Colour::Cicp {
+        colour: Some(Colour::Cicp(Cicp {
             primaries: 12,
             transfer: 13,
             matrix: 6,
             full_range: true,
-        }),
+        })),
         rotation: 1,
         mirror: Some(0),
         alpha: true,
@@ -1103,7 +1107,7 @@ fn bmff_reads_the_primary_item_and_its_properties() {
         (info.kind, info.width, info.rotation),
         (Kind::Avif, 1024, 0)
     );
-    assert_eq!(info.colour, Some(bmff::Colour::Icc(profile(40))));
+    assert_eq!(info.colour, Some(Colour::Icc(profile(40))));
     assert_eq!((info.alpha, info.exif), (false, None));
 
     // A tone-mapped primary goes by its base image.

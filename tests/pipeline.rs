@@ -5,7 +5,7 @@ mod common;
 use std::path::Path;
 
 use common::*;
-use image_convert::color::to_srgb;
+use image_convert::color::{Cicp, Colour, to_srgb};
 use image_convert::detect::{Kind, detect};
 use image_convert::resize::size_and_orient;
 use image_convert::{
@@ -114,8 +114,8 @@ fn delta_e_matches_the_published_test_pairs() {
     assert!((d - 27.1492).abs() < 1e-4, "{d}");
 }
 
-#[test]
-fn display_p3_jpeg_matches_the_matrix_conversion() {
+/// 48 × 24 px of Display P3 colour patches (8 px squares) and their sRGB by the published matrix.
+fn p3_patches() -> (Vec<u8>, Vec<u8>) {
     // Display P3 → sRGB, both D65 with the sRGB curve.
     const P3_TO_SRGB: [[f64; 3]; 3] = [
         [1.2249401, -0.2249404, 0.0],
@@ -136,24 +136,44 @@ fn display_p3_jpeg_matches_the_matrix_conversion() {
         .flat_map(|r| [60, 180].map(|g| (r, g)))
         .flat_map(|(r, g)| [50, 140, 220].map(|b| [r, g, b]))
         .collect();
-    let (width, height) = (48u16, 24u16);
-    let mut p3 = vec![0; usize::from(width) * usize::from(height) * 3];
+    let mut p3 = vec![0; 48 * 24 * 3];
     let mut expected = p3.clone();
     for (i, px) in p3.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-        let (x, y) = (i % usize::from(width), i / usize::from(width));
-        let colour = colours[y / 8 * 6 + x / 8];
+        let colour = colours[i / 48 / 8 * 6 + i % 48 / 8];
         *px = colour;
         let light = colour.map(linear);
         for (c, row) in P3_TO_SRGB.iter().enumerate() {
             expected[3 * i + c] = encode_curve((0..3).map(|k| row[k] * light[k]).sum());
         }
     }
+    (p3, expected)
+}
+
+#[test]
+fn display_p3_jpeg_and_code_points_match_the_matrix_conversion() {
+    let (p3, expected) = p3_patches();
     let icc = ColorProfile::new_display_p3().encode().unwrap();
-    let file = jpeg(width, height, Jpeg::Rgb, &p3, |e| {
+    let file = jpeg(48, 24, Jpeg::Rgb, &p3, |e| {
         e.set_quality(100);
         e.add_icc_profile(&icc).unwrap();
     });
     let mut px = decode(&file);
+    let (image, color) = to_srgb(&mut px);
+    assert_eq!(
+        (color.kind, color.profile.as_deref()),
+        ("converted", Some("Display P3"))
+    );
+    let worst = worst_delta_e(&image.data, &expected);
+    assert!(worst <= 2.0, "ΔE2000 {worst}");
+
+    // The same patches described by nclx code points (P3 primaries, sRGB transfer).
+    px.samples = Samples::U8(p3);
+    px.colour = Some(Colour::Cicp(Cicp {
+        primaries: 12,
+        transfer: 13,
+        matrix: 0,
+        full_range: true,
+    }));
     let (image, color) = to_srgb(&mut px);
     assert_eq!(
         (color.kind, color.profile.as_deref()),
@@ -193,7 +213,10 @@ fn adobe_rgb_tiff_matches_lcms2() {
     let Samples::U8(rgb) = &png.samples else {
         unreachable!()
     };
-    let icc = png.icc.take();
+    let icc = match png.colour.take() {
+        Some(Colour::Icc(icc)) => Some(icc),
+        _ => None,
+    };
     let file = tiff::<RGB8>(
         48,
         32,

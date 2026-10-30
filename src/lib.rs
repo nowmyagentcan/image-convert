@@ -61,7 +61,7 @@ pub struct Pixels {
     pub samples: Samples,
     /// The source's bits per sample.
     pub bit_depth: u8,
-    pub icc: Option<Vec<u8>>,
+    pub colour: Option<color::Colour>,
     /// The EXIF block, from its TIFF header on.
     pub exif: Option<Vec<u8>>,
     /// The EXIF orientation, 1–8.

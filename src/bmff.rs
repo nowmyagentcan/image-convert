@@ -4,6 +4,7 @@
 use crate::check_size;
 use std::cell::Cell;
 
+use crate::color::{Cicp, Colour};
 use crate::detect::Kind;
 use crate::error::Error;
 
@@ -20,18 +21,6 @@ struct Reader<'a> {
     file: &'a [u8],
     format: &'a str,
     count: Cell<usize>,
-}
-
-/// A colour description from `colr`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Colour {
-    Icc(Vec<u8>),
-    Cicp {
-        primaries: u16,
-        transfer: u16,
-        matrix: u16,
-        full_range: bool,
-    },
 }
 
 /// What a HEIF or AVIF file's primary image is, read before any OS decoder sees the file.
@@ -343,12 +332,13 @@ pub fn heif(data: &[u8], kind: Kind) -> Result<Heif, Error> {
     check_size(width, height, &label)?;
     let colour = match property(primary, b"colr") {
         Some(colr) => match r.get(colr.start, 4)? {
-            b"nclx" => Some(Colour::Cicp {
+            b"nclx" => Some(Colour::Cicp(Cicp {
                 primaries: r.uint(colr.start + 4, 2)? as u16,
                 transfer: r.uint(colr.start + 6, 2)? as u16,
                 matrix: r.uint(colr.start + 8, 2)? as u16,
                 full_range: r.uint(colr.start + 10, 1)? & 0x80 != 0,
-            }),
+            })),
+
             b"prof" | b"rICC" => Some(Colour::Icc(data[colr.start + 4..colr.end].to_vec())),
             _ => None,
         },

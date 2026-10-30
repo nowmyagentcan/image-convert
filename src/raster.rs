@@ -7,6 +7,7 @@ use image::codecs::{bmp::BmpDecoder, gif::GifDecoder, ico::IcoDecoder, png::PngD
 use image::error::UnsupportedErrorKind;
 use image::{ImageDecoder, ImageError, ImageResult, Limits};
 
+use crate::color::Colour;
 use crate::detect::Kind;
 use crate::error::{Error, Warning};
 use crate::{Layout, Pixels, Samples, check_size, exif_and_orientation};
@@ -71,7 +72,7 @@ pub fn decode(data: &[u8], kind: Kind) -> Result<Pixels, Error> {
         } else {
             8
         },
-        icc,
+        colour: icc.map(Colour::Icc),
         exif,
         orientation,
         frames,

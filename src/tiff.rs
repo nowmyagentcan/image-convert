@@ -5,6 +5,7 @@ use std::io::Cursor;
 
 use ::tiff::decoder::{Decoder, DecodingResult, Limits};
 
+use crate::color::Colour;
 use crate::error::{Error, Warning};
 use crate::jpeg::ycc_to_rgb;
 use crate::{Layout, Pixels, Samples, check_size};
@@ -385,7 +386,7 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         layout,
         samples,
         bit_depth: page.bits as u8,
-        icc: ifd0.bytes(34675).map(<[u8]>::to_vec),
+        colour: ifd0.bytes(34675).map(|icc| Colour::Icc(icc.to_vec())),
         exif: None,
         orientation: orientation.unwrap_or(1) as u8,
         frames: pages,

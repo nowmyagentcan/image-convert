@@ -101,7 +101,7 @@ pub fn render(data: &[u8], options: &Options) -> Result<(Pixels, (u32, u32)), Er
         layout: Layout::Rgba,
         samples: Samples::U8(pixmap.take_demultiplied()),
         bit_depth: 8,
-        icc: None,
+        colour: None,
         exif: None,
         orientation: 1,
         frames: 1,

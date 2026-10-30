@@ -5,6 +5,7 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
+use crate::color::Colour;
 use crate::error::Error;
 use crate::{Layout, Pixels, Samples, check_size, exif_and_orientation};
 
@@ -81,7 +82,7 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         layout,
         samples: Samples::U8(samples),
         bit_depth: 8,
-        icc: decoder.icc_profile(),
+        colour: decoder.icc_profile().map(Colour::Icc),
         exif,
         orientation,
         frames: 1,
