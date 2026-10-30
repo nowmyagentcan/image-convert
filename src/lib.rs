@@ -9,6 +9,7 @@ pub mod error;
 pub mod jpeg;
 pub mod jxl;
 pub mod os;
+pub mod paths;
 pub mod raster;
 pub mod raw;
 pub mod resize;
