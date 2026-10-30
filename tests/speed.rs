@@ -204,9 +204,23 @@ fn row(case: &str, input: Option<PathBuf>, args: &[&str], ms: u64, rss_mb: Optio
 fn meets_the_speed_and_memory_targets() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("speed");
     fs::create_dir_all(&dir).unwrap();
-    let write = |name: &str, data: Vec<u8>| {
+    // A child process writes the inputs: on Linux a child's peak memory starts at its parent's,
+    // so the measuring process must never hold the large ones.
+    let writing = std::env::var_os("IMAGE_CONVERT_SPEED_WRITE").is_some();
+    if !writing {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "meets_the_speed_and_memory_targets"])
+            .env("IMAGE_CONVERT_SPEED_WRITE", "1")
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let write = |name: &str, data: &dyn Fn() -> Vec<u8>| {
         let path = dir.join(name);
-        fs::write(&path, data).unwrap();
+        if writing {
+            fs::write(&path, data()).unwrap();
+        }
         Some(path)
     };
     let given = |name: &str| {
@@ -219,31 +233,24 @@ fn meets_the_speed_and_memory_targets() {
         Some(Path::new(&dir).join(name)).filter(|p| p.is_file())
     };
 
-    let shot = write(
-        "screenshot.png",
-        png_rgb(1920, 1080, &screenshot(1920, 1080)),
-    );
-    let small = write("small.png", png_rgb(64, 48, &photo(64, 48)));
-    let j12 = write("12mp.jpg", jpeg_photo(4032, 3024, Some(6)));
-    let j48 = write("48mp.jpg", jpeg_photo(8000, 6000, None));
-    let j200 = write("200mp.jpg", jpeg_photo(16320, 12240, None));
-    let tiff = {
+    let shot = write("screenshot.png", &|| {
+        png_rgb(1920, 1080, &screenshot(1920, 1080))
+    });
+    let small = write("small.png", &|| png_rgb(64, 48, &photo(64, 48)));
+    let j12 = write("12mp.jpg", &|| jpeg_photo(4032, 3024, Some(6)));
+    let j48 = write("48mp.jpg", &|| jpeg_photo(8000, 6000, None));
+    let j200 = write("200mp.jpg", &|| jpeg_photo(16320, 12240, None));
+    let tiff = write("33mp.tif", &|| {
         let (w, h) = (6680, 5000);
-        let px = photo(w, h);
-        let lzw = tiff::encoder::Compression::Lzw;
-        let no = tiff::tags::Predictor::None;
-        write(
-            "33mp.tif",
-            tiff::<tiff::encoder::colortype::RGB8>(w, h, &px, lzw, no, &[], None, 1),
-        )
-    };
-    let big_png = {
-        let px = photo(1800, 1200);
-        write("2mb.png", png_rgb(1800, 1200, &px))
-    };
-    let mut huge = png_rgb(1, 1, &[0, 0, 0]);
-    huge[16..24].copy_from_slice(&[0, 1, 0x86, 0xa0, 0, 1, 0x86, 0xa0]);
-    let huge = write("100000.png", huge);
+        let (lzw, no) = (tiff::encoder::Compression::Lzw, tiff::tags::Predictor::None);
+        tiff::<tiff::encoder::colortype::RGB8>(w, h, &photo(w, h), lzw, no, &[], None, 1)
+    });
+    let big_png = write("2mb.png", &|| png_rgb(1800, 1200, &photo(1800, 1200)));
+    let huge = write("100000.png", &|| {
+        let mut huge = png_rgb(1, 1, &[0, 0, 0]);
+        huge[16..24].copy_from_slice(&[0, 1, 0x86, 0xa0, 0, 1, 0x86, 0xa0]);
+        huge
+    });
     let paths = (0..400)
         .map(|i| format!(r#"<path d="M{} {}c40-30 80 30 120 0s80-30 120 0" fill="none" stroke="hsl({} 60% 40%)" stroke-width="3"/>"#, i % 20 * 50, i / 20 * 50, i % 360))
         .collect::<String>();
@@ -255,8 +262,11 @@ fn meets_the_speed_and_memory_targets() {
     let texts = (0..20)
         .map(|i| format!(r#"<text x="40" y="{}" font-family="sans-serif" font-size="28">Convert images agents can't open, line {i}</text>"#, 60 + i * 48))
         .collect::<String>();
-    let svg_text = write("text.svg", svg(&texts).into_bytes());
-    let svg_plain = write("plain.svg", svg("").into_bytes());
+    let svg_text = write("text.svg", &|| svg(&texts).into_bytes());
+    let svg_plain = write("plain.svg", &|| svg("").into_bytes());
+    if writing {
+        return;
+    }
     let size = fs::metadata(dir.join("2mb.png")).unwrap().len();
     assert!(
         size >= 1_500_000,
