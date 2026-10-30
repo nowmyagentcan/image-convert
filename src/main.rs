@@ -8,13 +8,12 @@ use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Instant;
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser};
-use image_convert::engine::{self, FileResult, Report};
+use image_convert::engine::{self, Report};
 use image_convert::error::Error;
 use image_convert::paths::{self, Input, Target};
-use image_convert::{Fit, Format, Options, os};
+use image_convert::{Choices, Format, Options, os};
 use serde::Serialize;
 use text::{Look, Out};
 
@@ -145,58 +144,19 @@ struct Cli {
 impl Cli {
     /// The conversion options, or the usage error a value gives.
     fn options(&self) -> Result<Options, Error> {
-        let size = |value: &Option<String>, name| {
-            let n = value
-                .as_deref()
-                .map(|v| v.parse().ok().filter(|n| (1..=65535).contains(n)));
-            n.map(|n| n.ok_or_else(|| Error::bad_size(name, 1, 65535)))
-                .transpose()
-        };
-        let to = match self.to.as_deref().map(str::to_ascii_lowercase).as_deref() {
-            None | Some("auto") => None,
-            Some("png") => Some(Format::Png),
-            Some("jpeg" | "jpg") => Some(Format::Jpeg),
-            Some("webp") => Some(Format::Webp),
-            Some(_) => return Err(Error::bad_format(self.to.as_deref().unwrap_or_default())),
-        };
-        let fit = match self.fit.as_deref() {
-            None | Some("none") => Fit::None,
-            Some("vision") => Fit::Vision,
-            Some("vision-hd") => Fit::VisionHd,
-            Some(other) => return Err(Error::bad_fit(other)),
-        };
-        let max_megapixels = self.max_megapixels.as_deref().map(|v| {
-            v.parse()
-                .ok()
-                .filter(|x: &f64| (0.01..=200.0).contains(x))
-                .ok_or_else(Error::bad_megapixels)
-        });
-        let quality = self.quality.as_deref().map(|v| {
-            v.parse()
-                .ok()
-                .filter(|q| (1..=100).contains(q))
-                .ok_or_else(Error::bad_quality)
-        });
-        let max_bytes = self
-            .max_bytes
-            .as_deref()
-            .map(|v| byte_size(v).ok_or_else(|| Error::bad_bytes(v)));
-        let background = self
-            .background
-            .as_deref()
-            .map(|v| colour(v).ok_or_else(|| Error::bad_color(v)));
-        Ok(Options {
-            to,
-            fit,
-            max_side: size(&self.max_side, "max-side")?,
-            max_megapixels: max_megapixels.transpose()?,
-            max_bytes: max_bytes.transpose()?,
-            width: size(&self.width, "width")?,
-            height: size(&self.height, "height")?,
-            quality: quality.transpose()?,
-            background: background.transpose()?.unwrap_or([255; 3]),
+        Choices {
+            to: self.to.clone(),
+            fit: self.fit.clone(),
+            max_side: self.max_side.clone(),
+            max_megapixels: self.max_megapixels.clone(),
+            max_bytes: self.max_bytes.clone(),
+            width: self.width.clone(),
+            height: self.height.clone(),
+            quality: self.quality.clone(),
+            background: self.background.clone(),
             keep_exif: self.keep_exif,
-        })
+        }
+        .options()
     }
 
     /// Where outputs go, with `options.to` set from a `-o` file's extension when `--to` isn't
@@ -233,37 +193,6 @@ impl Cli {
             _ => {}
         }
         Ok(target)
-    }
-}
-
-/// `500KB`, `2MB`, `3MiB` or plain digits as bytes, between 1 KB and 1 GiB.
-fn byte_size(value: &str) -> Option<u64> {
-    let digits = value.len() - value.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    let (number, unit) = value.split_at(digits);
-    let unit = match unit.to_ascii_lowercase().as_str() {
-        "" => 1,
-        "kb" => 1000,
-        "mb" => 1_000_000,
-        "kib" => 1024,
-        "mib" => 1 << 20,
-        _ => return None,
-    };
-    let bytes = number.parse::<u64>().ok()?.checked_mul(unit)?;
-    (1000..=1 << 30).contains(&bytes).then_some(bytes)
-}
-
-/// `white`, `black` or `#rrggbb`.
-fn colour(value: &str) -> Option<[u8; 3]> {
-    match value.to_ascii_lowercase().as_str() {
-        "white" => Some([255; 3]),
-        "black" => Some([0; 3]),
-        hex => {
-            let hex = hex
-                .strip_prefix('#')
-                .filter(|h| h.len() == 6 && h.is_ascii())?;
-            let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
-            Some([byte(0)?, byte(2)?, byte(4)?])
-        }
     }
 }
 
@@ -367,7 +296,7 @@ fn convert(
             all => format!("Converting {n} of {all} {} {name}", err.look.pick("·", "-")),
         };
         let file = text::spin(err, &label, || {
-            convert_one(input, options, target, cli.overwrite)
+            engine::convert_input(input, options, target, cli.overwrite)
         })?;
         if cli.debug {
             text::debug(err, &file)?;
@@ -386,46 +315,6 @@ fn convert(
     }
     out.w.flush()?;
     Ok(report.exit_code())
-}
-
-/// Reads, converts and writes one input; only a failed write to stdout is an `Err`.
-fn convert_one(
-    input: &Input,
-    options: &Options,
-    target: &Target,
-    overwrite: bool,
-) -> io::Result<FileResult> {
-    let start = Instant::now();
-    let data = match input.load() {
-        Ok(data) => data,
-        Err(e) => return Ok(FileResult::failed(input.name(), e)),
-    };
-    let read = start.elapsed();
-    let (mut file, bytes) = engine::convert(input.name(), &data, options);
-    file.steps.insert(0, ("read", read));
-    let Some(bytes) = bytes else {
-        return Ok(file);
-    };
-    let start = Instant::now();
-    let ext = match file.format {
-        Some("jpeg") => "jpg",
-        format => format.unwrap_or_default(),
-    };
-    match input.output(target, ext, overwrite) {
-        Ok(Some(path)) => match engine::write(&path, &bytes) {
-            Ok(()) => file.output = Some(path.to_string_lossy().into_owned()),
-            Err(e) => file.fail(e),
-        },
-        Ok(None) => {
-            let mut stdout = io::stdout().lock();
-            stdout.write_all(&bytes)?;
-            stdout.flush()?;
-            file.output = Some("-".into());
-        }
-        Err(e) => file.fail(e),
-    }
-    file.steps.push(("write", start.elapsed()));
-    Ok(file)
 }
 
 /// One `formats --json` row.
@@ -489,42 +378,4 @@ fn clap_message(e: &clap::Error) -> String {
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_default();
     format!("{first}{}.", chars.as_str())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn byte_sizes_take_decimal_and_binary_units_within_range() {
-        assert_eq!(byte_size("500KB"), Some(500_000));
-        assert_eq!(byte_size("2mb"), Some(2_000_000));
-        assert_eq!(byte_size("3MiB"), Some(3 << 20));
-        assert_eq!(byte_size("1KiB"), Some(1024));
-        assert_eq!(byte_size("1000"), Some(1000));
-        assert_eq!(byte_size("1024MiB"), Some(1 << 30));
-        for bad in [
-            "999",
-            "1025MiB",
-            "KB",
-            "1.5MB",
-            "5 KB",
-            "-5KB",
-            "5GB",
-            "",
-            "99999999999999999999",
-        ] {
-            assert_eq!(byte_size(bad), None, "{bad}");
-        }
-    }
-
-    #[test]
-    fn colours_are_names_or_hex() {
-        assert_eq!(colour("White"), Some([255; 3]));
-        assert_eq!(colour("black"), Some([0; 3]));
-        assert_eq!(colour("#1A2b3C"), Some([0x1a, 0x2b, 0x3c]));
-        for bad in ["#12345", "#1234567", "red", "123456", "#12345g", "#ééé"] {
-            assert_eq!(colour(bad), None, "{bad}");
-        }
-    }
 }

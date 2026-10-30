@@ -20,6 +20,7 @@ pub mod webp;
 
 use detect::Kind;
 use error::{Error, ExifSkip, Warning};
+use serde::{Deserialize, Deserializer};
 
 /// How the samples of one pixel are laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +165,129 @@ impl Options {
     }
 }
 
+/// Option values as the CLI, the page's `X-Options` and the MCP tools give them, before they
+/// are checked; numbers are kept as text, so every face refuses a value with the same error.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Choices {
+    pub to: Option<String>,
+    pub fit: Option<String>,
+    #[serde(default, deserialize_with = "text")]
+    pub max_side: Option<String>,
+    #[serde(default, deserialize_with = "text")]
+    pub max_megapixels: Option<String>,
+    #[serde(default, deserialize_with = "text")]
+    pub max_bytes: Option<String>,
+    #[serde(default, deserialize_with = "text")]
+    pub width: Option<String>,
+    #[serde(default, deserialize_with = "text")]
+    pub height: Option<String>,
+    #[serde(default, deserialize_with = "text")]
+    pub quality: Option<String>,
+    pub background: Option<String>,
+    #[serde(default)]
+    pub keep_exif: bool,
+}
+
+/// A JSON number or string as its text.
+fn text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(
+        Option::<serde_json::Value>::deserialize(d)?.map(|v| match v {
+            serde_json::Value::String(s) => s,
+            v => v.to_string(),
+        }),
+    )
+}
+
+impl Choices {
+    /// The conversion options, or the usage error a value gives.
+    pub fn options(&self) -> Result<Options, Error> {
+        let size = |value: &Option<String>, name| {
+            let n = value
+                .as_deref()
+                .map(|v| v.parse().ok().filter(|n| (1..=65535).contains(n)));
+            n.map(|n| n.ok_or_else(|| Error::bad_size(name, 1, 65535)))
+                .transpose()
+        };
+        let to = match self.to.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            None | Some("auto") => None,
+            Some("png") => Some(Format::Png),
+            Some("jpeg" | "jpg") => Some(Format::Jpeg),
+            Some("webp") => Some(Format::Webp),
+            Some(_) => return Err(Error::bad_format(self.to.as_deref().unwrap_or_default())),
+        };
+        let fit = match self.fit.as_deref() {
+            None | Some("none") => Fit::None,
+            Some("vision") => Fit::Vision,
+            Some("vision-hd") => Fit::VisionHd,
+            Some(other) => return Err(Error::bad_fit(other)),
+        };
+        let max_megapixels = self.max_megapixels.as_deref().map(|v| {
+            v.parse()
+                .ok()
+                .filter(|x: &f64| (0.01..=200.0).contains(x))
+                .ok_or_else(Error::bad_megapixels)
+        });
+        let quality = self.quality.as_deref().map(|v| {
+            v.parse()
+                .ok()
+                .filter(|q| (1..=100).contains(q))
+                .ok_or_else(Error::bad_quality)
+        });
+        let max_bytes = self
+            .max_bytes
+            .as_deref()
+            .map(|v| byte_size(v).ok_or_else(|| Error::bad_bytes(v)));
+        let background = self
+            .background
+            .as_deref()
+            .map(|v| colour(v).ok_or_else(|| Error::bad_color(v)));
+        Ok(Options {
+            to,
+            fit,
+            max_side: size(&self.max_side, "max-side")?,
+            max_megapixels: max_megapixels.transpose()?,
+            max_bytes: max_bytes.transpose()?,
+            width: size(&self.width, "width")?,
+            height: size(&self.height, "height")?,
+            quality: quality.transpose()?,
+            background: background.transpose()?.unwrap_or([255; 3]),
+            keep_exif: self.keep_exif,
+        })
+    }
+}
+
+/// `500KB`, `2MB`, `3MiB` or plain digits as bytes, between 1 KB and 1 GiB.
+fn byte_size(value: &str) -> Option<u64> {
+    let digits = value.len() - value.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let (number, unit) = value.split_at(digits);
+    let unit = match unit.to_ascii_lowercase().as_str() {
+        "" => 1,
+        "kb" => 1000,
+        "mb" => 1_000_000,
+        "kib" => 1024,
+        "mib" => 1 << 20,
+        _ => return None,
+    };
+    let bytes = number.parse::<u64>().ok()?.checked_mul(unit)?;
+    (1000..=1 << 30).contains(&bytes).then_some(bytes)
+}
+
+/// `white`, `black` or `#rrggbb`.
+fn colour(value: &str) -> Option<[u8; 3]> {
+    match value.to_ascii_lowercase().as_str() {
+        "white" => Some([255; 3]),
+        "black" => Some([0; 3]),
+        hex => {
+            let hex = hex
+                .strip_prefix('#')
+                .filter(|h| h.len() == 6 && h.is_ascii())?;
+            let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+            Some([byte(0)?, byte(2)?, byte(4)?])
+        }
+    }
+}
+
 /// An encoded image and the facts results report about it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Output {
@@ -293,6 +417,53 @@ fn upright_exif(exif: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_sizes_take_decimal_and_binary_units_within_range() {
+        assert_eq!(byte_size("500KB"), Some(500_000));
+        assert_eq!(byte_size("2mb"), Some(2_000_000));
+        assert_eq!(byte_size("3MiB"), Some(3 << 20));
+        assert_eq!(byte_size("1KiB"), Some(1024));
+        assert_eq!(byte_size("1000"), Some(1000));
+        assert_eq!(byte_size("1024MiB"), Some(1 << 30));
+        for bad in [
+            "999",
+            "1025MiB",
+            "KB",
+            "1.5MB",
+            "5 KB",
+            "-5KB",
+            "5GB",
+            "",
+            "99999999999999999999",
+        ] {
+            assert_eq!(byte_size(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn colours_are_names_or_hex() {
+        assert_eq!(colour("White"), Some([255; 3]));
+        assert_eq!(colour("black"), Some([0; 3]));
+        assert_eq!(colour("#1A2b3C"), Some([0x1a, 0x2b, 0x3c]));
+        for bad in ["#12345", "#1234567", "red", "123456", "#12345g", "#ééé"] {
+            assert_eq!(colour(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn json_choices_take_numbers_as_their_text() {
+        let choices: Choices =
+            serde_json::from_str(r#"{"max_side":1568,"quality":"90","max_bytes":300000}"#).unwrap();
+        let options = choices.options().unwrap();
+        assert_eq!(
+            (options.max_side, options.quality, options.max_bytes),
+            (Some(1568), Some(90), Some(300_000))
+        );
+        let half: Choices = serde_json::from_str(r#"{"width":1.5}"#).unwrap();
+        assert_eq!(half.options().unwrap_err().code, "bad_size");
+        assert!(serde_json::from_str::<Choices>(r#"{"colour":"red"}"#).is_err());
+    }
 
     #[test]
     fn sizes_are_checked_against_the_limits() {

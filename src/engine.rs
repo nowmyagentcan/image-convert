@@ -5,7 +5,7 @@
 
 use std::cell::Cell;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{self, Write};
 use std::panic::{self, AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::Once;
@@ -17,6 +17,7 @@ use serde::Serialize;
 
 use crate::detect::{Kind, detect};
 use crate::error::{Error, Warning, panic_message};
+use crate::paths::{Input, Target};
 use crate::{Options, Pixels, bmff, color, jpeg, jxl, os, raster, raw, render, svg, tiff};
 
 /// The worker's name, which tells the panic hook to stay quiet.
@@ -100,6 +101,14 @@ impl FileResult {
         (self.format, self.width, self.height, self.bytes) = (None, None, None, None);
         (self.quality, self.resized, self.exif) = (None, None, None);
         self.error = Some(error);
+    }
+
+    /// The output's file extension: `jpg` for JPEG.
+    pub fn extension(&self) -> &'static str {
+        match self.format {
+            Some("jpeg") => "jpg",
+            format => format.unwrap_or_default(),
+        }
     }
 
     /// The source's size upright, as `· from W×H` shows it.
@@ -209,6 +218,43 @@ fn run(data: &[u8], options: &Options, file: &mut FileResult) -> Result<Vec<u8>,
     (file.quality, file.exif) = (out.quality, Some(out.exif));
     file.warnings = out.warnings;
     Ok(out.bytes)
+}
+
+/// Reads, converts and writes one input to where `target` says; only a failed write to stdout
+/// is an `Err`.
+pub fn convert_input(
+    input: &Input,
+    options: &Options,
+    target: &Target,
+    overwrite: bool,
+) -> io::Result<FileResult> {
+    let start = Instant::now();
+    let data = match input.load() {
+        Ok(data) => data,
+        Err(e) => return Ok(FileResult::failed(input.name(), e)),
+    };
+    let read = start.elapsed();
+    let (mut file, bytes) = convert(input.name(), &data, options);
+    file.steps.insert(0, ("read", read));
+    let Some(bytes) = bytes else {
+        return Ok(file);
+    };
+    let start = Instant::now();
+    match input.output(target, file.extension(), overwrite) {
+        Ok(Some(path)) => match write(&path, &bytes) {
+            Ok(()) => file.output = Some(path.to_string_lossy().into_owned()),
+            Err(e) => file.fail(e),
+        },
+        Ok(None) => {
+            let mut stdout = io::stdout().lock();
+            stdout.write_all(&bytes)?;
+            stdout.flush()?;
+            file.output = Some("-".into());
+        }
+        Err(e) => file.fail(e),
+    }
+    file.steps.push(("write", start.elapsed()));
+    Ok(file)
 }
 
 /// Writes `bytes` to `path` through a temporary file in the same folder that is then renamed
