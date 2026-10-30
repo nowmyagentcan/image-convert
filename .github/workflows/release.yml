@@ -67,7 +67,11 @@ jobs:
           { echo; echo ================================================================================
             echo 'libwebp 1.6.0 (the WebP encoder, compiled in): COPYING and PATENTS'
             echo --------------------------------------------------------------------------------; echo
-            cat vendor/libwebp/COPYING; echo; cat vendor/libwebp/PATENTS; } >> THIRD-PARTY-LICENSES.txt
+            cat vendor/libwebp/COPYING; echo; cat vendor/libwebp/PATENTS
+            echo; echo ================================================================================
+            echo 'Noto Sans Regular 2.015 (the font for SVG text, built in): SIL Open Font License 1.1'
+            echo --------------------------------------------------------------------------------; echo
+            cat assets/fonts/OFL.txt; } >> THIRD-PARTY-LICENSES.txt
           mkdir dist
           for t in $(ls bin); do
             n=image-convert-$v-$t

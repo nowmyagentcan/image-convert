@@ -9,6 +9,7 @@ pub mod jpeg;
 pub mod jxl;
 pub mod raster;
 pub mod resize;
+pub mod svg;
 pub mod tiff;
 pub mod webp;
 

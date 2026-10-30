@@ -1,0 +1,7 @@
+NotoSans-Regular.ttf: Noto Sans Regular, version 2.015 (notofonts/latin-greek-cyrillic release
+NotoSans-v2.015), the unhinted TTF from github.com/notofonts/notofonts.github.io at
+fonts/NotoSans/unhinted/ttf/NotoSans-Regular.ttf, unchanged.
+SHA-256: f3961a9cde016d41a4879aecda1474d3a36d6bf54fa0e4643de029cc2248b0e8
+
+It is built into image-convert as the font for SVG text that names a generic family or a font
+the system lacks. Licensed under the SIL Open Font License 1.1: see OFL.txt.

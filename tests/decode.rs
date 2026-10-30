@@ -10,7 +10,7 @@ use std::path::Path;
 use common::*;
 use image_convert::detect::{Kind, detect};
 use image_convert::error::Error;
-use image_convert::{Layout, Pixels, Samples, jpeg, jxl, raster, tiff as tif};
+use image_convert::{Layout, Options, Pixels, Samples, jpeg, jxl, raster, svg, tiff as tif};
 use jpeg_encoder::{ColorType as Jpeg, SamplingFactor};
 use png::{BitDepth, ColorType as Png};
 
@@ -857,4 +857,173 @@ fn jpeg_xl_lossy_lossless_grey_alpha_animated_and_cmyk() {
 
     let cut = &fixture("jxl-lossy.jxl")[..600];
     assert_eq!(decode(cut).unwrap_err().code, "corrupt_image");
+}
+
+fn svg(text: &str, options: &Options) -> Result<(Pixels, (u32, u32)), Error> {
+    svg::render(text.as_bytes(), options)
+}
+
+/// The RGBA pixel at (x, y).
+fn at(px: &Pixels, x: u32, y: u32) -> [u8; 4] {
+    let i = 4 * (y * px.width + x) as usize;
+    u8s(px)[i..i + 4].try_into().unwrap()
+}
+
+#[test]
+fn svg_renders_shapes_at_its_own_or_the_asked_size() {
+    let shapes = "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='20'>
+        <rect width='20' height='20' fill='red'/><rect x='20' width='20' height='20' fill='#00f'/>
+        </svg>";
+    let (px, own) = svg(shapes, &Options::default()).unwrap();
+    assert_eq!(
+        (px.width, px.height, own, px.layout),
+        (40, 20, (40, 20), Layout::Rgba)
+    );
+    assert_eq!(
+        (at(&px, 5, 5), at(&px, 30, 15)),
+        ([255, 0, 0, 255], [0, 0, 255, 255])
+    );
+    let wide = Options {
+        width: Some(400),
+        ..Options::default()
+    };
+    let (px, _) = svg(shapes, &wide).unwrap();
+    assert_eq!(
+        (px.width, px.height, at(&px, 390, 190)),
+        (400, 200, [0, 0, 255, 255])
+    );
+
+    let view_box = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 12'/>";
+    assert_eq!(svg(view_box, &Options::default()).unwrap().1, (30, 12));
+    let percent = "<svg xmlns='http://www.w3.org/2000/svg' width='100%' height='100%'/>";
+    assert_eq!(svg(percent, &Options::default()).unwrap().1, (100, 100));
+}
+
+#[test]
+fn svg_sizes_beyond_the_limits_are_reduced_or_refused() {
+    let huge = "<svg xmlns='http://www.w3.org/2000/svg' width='1e9' height='5e8'/>";
+    let (px, own) = svg(huge, &Options::default()).unwrap();
+    assert_eq!(
+        (px.width, px.height, own),
+        (8192, 4096, (1_000_000_000, 500_000_000))
+    );
+    assert_eq!(
+        px.warnings[0].message,
+        "The drawing is 1000000000×500000000 px, so it was rendered at 8192×4096. Pass --width to choose a size."
+    );
+    let thin = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='1000'/>";
+    let tall = Options {
+        width: Some(1000),
+        ..Options::default()
+    };
+    let err = svg(thin, &tall).unwrap_err();
+    assert_eq!(err.code, "image_too_large");
+    assert_eq!(
+        err.hint,
+        Some("Use --width or --height to render it smaller.")
+    );
+}
+
+#[test]
+fn svg_refuses_nested_entities_and_utf16_quickly() {
+    let laughs = format!(
+        "<?xml version='1.0'?><!DOCTYPE svg [<!ENTITY a 'lol'>{}]><svg xmlns='http://www.w3.org/2000/svg'><text>&j;</text></svg>",
+        (b'b'..=b'j')
+            .map(|c| format!(
+                "<!ENTITY {} '{}'>",
+                c as char,
+                format!("&{};", (c - 1) as char).repeat(10)
+            ))
+            .collect::<String>()
+    );
+    let start = std::time::Instant::now();
+    let err = svg(&laughs, &Options::default()).unwrap_err();
+    assert!(start.elapsed().as_millis() < 100);
+    assert_eq!(
+        err.message,
+        "SVG with entities that reference other entities isn't supported."
+    );
+    let plain = "<!DOCTYPE svg [<!ENTITY w '40'>]><svg xmlns='http://www.w3.org/2000/svg' width='&w;' height='4'/>";
+    assert!(svg(plain, &Options::default()).is_ok());
+    let utf16: Vec<u8> = "\u{feff}<svg/>"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let err = svg::render(&utf16, &Options::default()).unwrap_err();
+    assert_eq!(err.message, "SVG with UTF-16 text isn't supported.");
+}
+
+#[test]
+fn svg_draws_data_images_and_skips_every_other_link() {
+    let red = png(1, 1, Png::Rgb, BitDepth::Eight, &[255, 0, 0], |_| {});
+    let b64 = base64(&red);
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' width='10' height='10'>
+        <image width='10' height='10' href='data:image/png;base64,{b64}'/>
+        <image width='5' height='5' href='file:///etc/passwd'/>
+        <image width='5' height='5' xlink:href='https://example.com/a.png'/></svg>"
+    );
+    let (px, _) = svg(&doc, &Options::default()).unwrap();
+    assert_eq!(at(&px, 8, 8), [255, 0, 0, 255]);
+    assert_eq!(
+        px.warnings[0].message,
+        "An image linked from outside the file (file:///etc/passwd … and 1 more) was left out."
+    );
+}
+
+#[test]
+fn svg_gradients_filters_and_text_render() {
+    let doc = "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='60'>
+        <defs><linearGradient id='g'><stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/></linearGradient>
+        <filter id='f'><feGaussianBlur stdDeviation='3'/></filter></defs>
+        <rect width='100' height='10' fill='url(#g)'/>
+        <rect x='40' y='15' width='20' height='10' fill='black' filter='url(#f)'/>
+        <text x='2' y='55' font-family='sans-serif' font-size='24'>Hi</text>
+        <text x='50' y='55' font-family='No Such Font' font-size='24'>Hi</text></svg>";
+    let (px, _) = svg(doc, &Options::default()).unwrap();
+    let (left, right) = (at(&px, 1, 5), at(&px, 98, 5));
+    assert!(left[0] > 240 && left[2] < 15 && right[2] > 240 && right[0] < 15);
+    let edge = at(&px, 39, 20)[3];
+    assert!(edge > 20 && edge < 235, "blur edge alpha {edge}");
+    let inked = |x0: u32| {
+        (x0..x0 + 40)
+            .flat_map(|x| (32..60).map(move |y| (x, y)))
+            .filter(|&(x, y)| at(&px, x, y)[3] > 128)
+            .count()
+    };
+    assert!(
+        inked(0) > 30 && inked(50) > 30,
+        "{} {}",
+        inked(0),
+        inked(50)
+    );
+}
+
+#[test]
+fn svgz_is_inflated_under_a_cap() {
+    use flate2::{Compression, write::GzEncoder};
+    use std::io::Write;
+    let gzip = |data: &[u8]| {
+        let mut e = GzEncoder::new(Vec::new(), Compression::best());
+        e.write_all(data).unwrap();
+        e.finish().unwrap()
+    };
+    let doc = b"<svg xmlns='http://www.w3.org/2000/svg' width='3' height='2'/>";
+    assert_eq!(detect(&gzip(doc), Path::new("a.svgz")), Ok(Kind::Gzip));
+    assert_eq!(svg::ungzip(&gzip(doc)).unwrap(), (doc.to_vec(), Kind::Svg));
+    let mut bomb = doc.to_vec();
+    bomb.resize(65 << 20, b' ');
+    let bomb = gzip(&bomb);
+    assert!(bomb.len() < 100_000);
+    let err = svg::ungzip(&bomb).unwrap_err();
+    assert_eq!(
+        err.message,
+        "The compressed file expands to more than 64 MiB."
+    );
+    let png = gzip(&png(1, 1, Png::Grayscale, BitDepth::Eight, &[0], |_| {}));
+    assert_eq!(svg::ungzip(&png).unwrap_err().code, "unsupported_format");
+    assert_eq!(
+        svg::ungzip(b"\x1f\x8b\x08junk").unwrap_err().code,
+        "corrupt_image"
+    );
 }
