@@ -1538,7 +1538,17 @@ fn heif_alpha_and_ten_bit_samples_come_through() {
             (image.width, image.height, image.layout),
             (40, 30, Layout::Rgba)
         );
-        let diff = mean_diff(&image.data, &expected);
+        // Compared as shown: ImageIO draws premultiplied, so faint pixels lose colour precision.
+        let shown = |rgba: &[u8]| -> Vec<u8> {
+            let pixels = rgba.as_chunks::<4>().0.iter();
+            pixels
+                .flat_map(|&[r, g, b, a]| {
+                    let premultiply = |c: u8| (u16::from(c) * u16::from(a) / 255) as u8;
+                    [premultiply(r), premultiply(g), premultiply(b), a]
+                })
+                .collect()
+        };
+        let diff = mean_diff(&shown(&image.data), &shown(&expected));
         assert!(diff <= 1.0, "mean difference {diff}");
     }
     if let Some(px) = os_heif("heif-10bit.avif") {
