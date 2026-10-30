@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::error::Error;
+use crate::tiff::Tiff;
 
 /// An input type we read. `Gzip` is inflated and detected again, so it never reaches a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,22 +181,9 @@ fn out_of_scope(head: &[u8]) -> Error {
 
 /// Whether IFD0 of a TIFF-structured file has the DNGVersion tag (0xC612).
 fn has_dng_version(data: &[u8]) -> bool {
-    let big = data[0] == b'M';
-    let u16_at = |o: usize| {
-        let b = data.get(o..o + 2)?;
-        Some(if big {
-            u16::from_be_bytes([b[0], b[1]])
-        } else {
-            u16::from_le_bytes([b[0], b[1]])
-        })
-    };
-    let ifd = match data.get(4..8) {
-        Some(b) if big => u32::from_be_bytes(b.try_into().unwrap()),
-        Some(b) => u32::from_le_bytes(b.try_into().unwrap()),
-        None => return false,
-    } as usize;
-    let count = u16_at(ifd).unwrap_or(0) as usize;
-    (0..count).any(|i| u16_at(ifd + 2 + i * 12) == Some(0xC612))
+    Tiff::new(data)
+        .and_then(|(tiff, first)| tiff.ifd(first, 0))
+        .is_some_and(|(ifd, _)| ifd.get(0xC612).is_some())
 }
 
 /// HEIC, AVIF or CR3 from an ISO-BMFF `ftyp` box's brands; the primary item decides HEIC/AVIF later.

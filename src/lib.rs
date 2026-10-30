@@ -8,6 +8,7 @@ pub mod error;
 pub mod jpeg;
 pub mod raster;
 pub mod resize;
+pub mod tiff;
 pub mod webp;
 
 use detect::Kind;
@@ -255,24 +256,16 @@ fn exif_and_orientation(exif: Option<Vec<u8>>) -> (Option<Vec<u8>>, u8) {
 /// upright now.
 fn upright_exif(exif: &[u8]) -> Vec<u8> {
     let mut out = exif.to_vec();
-    let big = exif.starts_with(b"MM");
-    let read = |at: usize, len: usize| {
-        let bytes = exif.get(at..at.checked_add(len)?)?;
-        let fold = |acc: usize, &b: &u8| acc << 8 | usize::from(b);
-        Some(if big {
-            bytes.iter().fold(0, fold)
+    let entry = tiff::Tiff::new(exif)
+        .and_then(|(t, first)| t.ifd(first, 0))
+        .and_then(|(ifd, _)| ifd.get(0x112).copied());
+    if let Some(e) = entry.filter(|e| e.kind == 3) {
+        let one = if exif.starts_with(b"MM") {
+            [0, 1]
         } else {
-            bytes.iter().rev().fold(0, fold)
-        })
-    };
-    let Some(ifd) = read(4, 4) else { return out };
-    for entry in (0..read(ifd, 2).unwrap_or(0)).map(|i| ifd + 2 + 12 * i) {
-        if read(entry, 2) == Some(0x112)
-            && read(entry + 2, 2) == Some(3)
-            && let Some(value) = out.get_mut(entry + 8..entry + 10)
-        {
-            value.copy_from_slice(if big { &[0, 1] } else { &[1, 0] });
-        }
+            [1, 0]
+        };
+        out[e.at..e.at + 2].copy_from_slice(&one);
     }
     out
 }
