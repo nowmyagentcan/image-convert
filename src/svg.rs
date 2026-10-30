@@ -70,23 +70,8 @@ pub fn render(data: &[u8], options: &Options) -> Result<(Pixels, (u32, u32)), Er
 
     let size = tree.size();
     let own = [size.width(), size.height()].map(|s| s.ceil().min(u32::MAX as f32) as u32);
-    let explicit = options.width.is_some() || options.height.is_some();
-    let base = match own[0].max(own[1]) {
-        longer if !explicit && longer > 8192 => {
-            let scale = 8192.0 / f64::from(longer);
-            own.map(|s| resize::scaled(s, scale))
-        }
-        _ => own,
-    };
-    let (width, height) = resize::target(base[0], base[1], options, false);
-    if width.max(height) > 16384 || u64::from(width) * u64::from(height) > 200_000_000 {
-        return Err(Error::image_too_large(width.into(), height.into(), true));
-    }
-    let mut warnings = Vec::new();
-    if base != own && [width, height] == base {
-        let from = (own[0].into(), own[1].into());
-        warnings.push(Warning::render_reduced(from, (width, height)));
-    }
+    let (width, height, reduced) = resize::vector_target(own, options)?;
+    let mut warnings: Vec<_> = reduced.into_iter().collect();
     let skipped = skipped.into_inner().unwrap();
     if let Some(first) = skipped.first() {
         warnings.push(Warning::external_image_skipped(first, skipped.len() - 1));

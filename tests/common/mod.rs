@@ -486,3 +486,79 @@ pub fn os_heif(name: &str) -> Option<image_convert::Pixels> {
         }
     }
 }
+
+/// A placeable WMF of 96 × 48 px (96 units per inch) with a steel-blue rectangle from (8, 8) to
+/// (88, 40) drawn without an outline.
+pub fn placeable_wmf() -> Vec<u8> {
+    let record = |function: u16, params: &[u16]| -> Vec<u8> {
+        let words = 3 + params.len() as u32;
+        let mut r = words.to_le_bytes().to_vec();
+        r.extend(function.to_le_bytes());
+        r.extend(params.iter().flat_map(|p| p.to_le_bytes()));
+        r
+    };
+    let records = [
+        record(0x020B, &[0, 0]),                 // SetWindowOrg
+        record(0x020C, &[48, 96]),               // SetWindowExt (y, x)
+        record(0x02FC, &[0, 0x8246, 0x00B4, 0]), // CreateBrushIndirect: solid, RGB(70, 130, 180)
+        record(0x012D, &[0]),                    // SelectObject
+        record(0x02FA, &[5, 0, 0, 0, 0]),        // CreatePenIndirect: PS_NULL
+        record(0x012D, &[1]),                    // SelectObject
+        record(0x041B, &[40, 88, 8, 8]),         // Rectangle (bottom, right, top, left)
+        record(0x0000, &[]),                     // EOF
+    ]
+    .concat();
+    let words = (18 + records.len()) as u32 / 2;
+    let mut header = vec![1, 0, 9, 0, 0, 3];
+    header.extend(words.to_le_bytes());
+    header.extend([2, 0]);
+    header.extend(9u32.to_le_bytes());
+    header.extend([0, 0]);
+    let mut placeable = b"\xd7\xcd\xc6\x9a\0\0".to_vec();
+    for v in [0u16, 0, 96, 48, 96] {
+        placeable.extend(v.to_le_bytes());
+    }
+    placeable.extend([0; 4]);
+    let checksum = placeable
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .fold(0, |x, w| x ^ u16::from_le_bytes(*w));
+    placeable.extend(checksum.to_le_bytes());
+    [placeable, header, records].concat()
+}
+
+/// A plain GDI EMF of 96 × 48 px (a 1 × 0.5 inch frame recorded at 96 DPI) with the same
+/// rectangle as [`placeable_wmf`] and an orange circle on it.
+pub fn plain_emf() -> Vec<u8> {
+    let record = |kind: u32, params: &[u32]| -> Vec<u8> {
+        let size = 8 + 4 * params.len() as u32;
+        [kind, size]
+            .iter()
+            .chain(params)
+            .flat_map(|v| v.to_le_bytes())
+            .collect()
+    };
+    let records = [
+        record(39, &[1, 0, 0x00B4_8246, 0]), // CreateBrushIndirect: object 1, solid, RGB(70, 130, 180)
+        record(37, &[1]),                    // SelectObject
+        record(37, &[0x8000_0008]),          // SelectObject: the stock NULL_PEN
+        record(43, &[8, 8, 88, 40]),         // Rectangle (left, top, right, bottom)
+        record(39, &[2, 0, 0x0000_A5FF, 0]), // CreateBrushIndirect: object 2, RGB(255, 165, 0)
+        record(37, &[2]),                    // SelectObject
+        record(42, &[60, 12, 84, 36]),       // Ellipse
+        record(14, &[0, 16, 20]),            // EOF
+    ]
+    .concat();
+    let size = 88 + records.len() as u32;
+    let header = [
+        [8, 8, 87, 39],                  // bounds in device pixels
+        [0, 0, 2540, 1270],              // frame in 0.01 mm
+        [0x464D_4520, 0x10000, size, 9], // ' EMF', version, bytes, records
+        [3, 0, 0, 0],                    // handles, description length and offset, palette
+        [960, 480, 254, 127],            // the reference device in pixels and mm (96 DPI)
+    ]
+    .concat();
+    let header = record(1, &header);
+    [header, records].concat()
+}

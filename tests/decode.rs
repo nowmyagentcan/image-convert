@@ -1572,3 +1572,74 @@ fn heif_alpha_and_ten_bit_samples_come_through() {
         assert!(diff <= 1.0, "mean difference {diff}");
     }
 }
+
+#[test]
+fn metafiles_render_on_windows_only() {
+    use flate2::{Compression, write::GzEncoder};
+    use image_convert::os::render_metafile;
+    use std::io::Write;
+    let (emf, wmf) = (plain_emf(), placeable_wmf());
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(&emf).unwrap();
+    let (emz, kind) = svg::ungzip(&gz.finish().unwrap()).unwrap();
+    assert_eq!(kind, Kind::Emf);
+    // (name, data, exact geometry, an orange circle drawn anti-aliased on the rectangle).
+    let cases = [
+        ("emf", emf, true, true),
+        ("emz", emz, true, true),
+        ("wmf", wmf.clone(), true, false),
+        ("emf-plus.emf", fixture("emf-plus.emf"), false, true),
+        ("emf-dual.emf", fixture("emf-dual.emf"), false, true),
+    ];
+    for (name, data, exact, circle) in cases {
+        let kind = detect(&data, Path::new(name)).unwrap();
+        let rendered = render_metafile(&data, kind, &Options::default());
+        if cfg!(not(windows)) {
+            assert_eq!(rendered.unwrap_err().code, "unsupported_on_platform");
+            continue;
+        }
+        let (px, own) = rendered.unwrap();
+        let size = (px.width, px.height, own, px.layout);
+        assert_eq!(size, (96, 48, (96, 48), Layout::Rgba), "{name}");
+        let Samples::U8(rgba) = &px.samples else {
+            unreachable!()
+        };
+        let at = |x: usize, y: usize| <[u8; 4]>::try_from(&rgba[(y * 96 + x) * 4..][..4]).unwrap();
+        assert_eq!(at(2, 2)[3], 0, "{name}: the background stays transparent");
+        assert_eq!(at(20, 24), [70, 130, 180, 255], "{name}");
+        if exact {
+            assert_eq!([at(9, 9)[3], at(86, 38)[3]], [255; 2], "{name}");
+            assert_eq!([at(6, 6)[3], at(89, 41)[3]], [0; 2], "{name}");
+        }
+        if circle {
+            let (blue, orange) = ([70, 130, 180, 255], [255, 165, 0, 255]);
+            let pixels = rgba.as_chunks::<4>().0;
+            assert!(pixels.contains(&orange), "{name}: no orange circle");
+            let blend = pixels
+                .iter()
+                .any(|p| p[3] == 255 && ![blue, orange].contains(p));
+            assert!(blend, "{name}: the circle's edge isn't anti-aliased");
+        }
+    }
+
+    // A WMF without its placeable header, and drawing to a size.
+    let plain = detect(&wmf[22..], Path::new("a.wmf")).unwrap();
+    let refused = render_metafile(&wmf[22..], plain, &Options::default()).unwrap_err();
+    let wide = Options {
+        width: Some(192),
+        ..Options::default()
+    };
+    let sized = render_metafile(&wmf, Kind::Wmf, &wide);
+    if cfg!(windows) {
+        let message = "WMF with no placeable header isn't supported.";
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            ("unsupported_variant", message)
+        );
+        let (px, own) = sized.unwrap();
+        assert_eq!((px.width, px.height, own), (192, 96, (96, 48)));
+    } else {
+        assert_eq!(refused.code, "unsupported_on_platform");
+        assert_eq!(sized.unwrap_err().code, "unsupported_on_platform");
+    }
+}

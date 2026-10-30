@@ -1,6 +1,7 @@
 //! Output sizes from presets and limits, Lanczos3 resizing on premultiplied alpha, and turning
 //! images upright.
 
+use crate::error::{Error, Warning};
 use crate::{Image, Options};
 use fast_image_resize::images::{Image as Buffer, ImageRef};
 use fast_image_resize::{PixelType, Resizer};
@@ -47,6 +48,30 @@ pub fn target(width: u32, height: u32, options: &Options, raster: bool) -> (u32,
 
 /// `side × scale` rounded down, at least 1; the nudge keeps exact products like 4032 × 1568/4032
 /// from rounding down to the integer below.
+/// The size to draw a vector image of `own` px at: its own size, cut to 8192 px a side unless
+/// `--width`/`--height` asks, fitted to `options`; with `render_reduced` when the cut decided
+/// it. Over 16384 px a side or 200 megapixels is `image_too_large`.
+pub fn vector_target(
+    own: [u32; 2],
+    options: &Options,
+) -> Result<(u32, u32, Option<Warning>), Error> {
+    let explicit = options.width.is_some() || options.height.is_some();
+    let base = match own[0].max(own[1]) {
+        longer if !explicit && longer > 8192 => {
+            let scale = 8192.0 / f64::from(longer);
+            own.map(|s| scaled(s, scale))
+        }
+        _ => own,
+    };
+    let (width, height) = target(base[0], base[1], options, false);
+    if width.max(height) > 16384 || u64::from(width) * u64::from(height) > 200_000_000 {
+        return Err(Error::image_too_large(width.into(), height.into(), true));
+    }
+    let reduced = (base != own && [width, height] == base)
+        .then(|| Warning::render_reduced((own[0].into(), own[1].into()), (width, height)));
+    Ok((width, height, reduced))
+}
+
 pub fn scaled(side: u32, scale: f64) -> u32 {
     ((f64::from(side) * scale + 1e-6).floor() as u32).max(1)
 }
