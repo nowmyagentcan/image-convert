@@ -6,6 +6,7 @@ pub mod detect;
 pub mod encode;
 pub mod error;
 pub mod jpeg;
+pub mod jxl;
 pub mod raster;
 pub mod resize;
 pub mod tiff;

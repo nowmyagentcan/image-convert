@@ -10,7 +10,7 @@ use std::path::Path;
 use common::*;
 use image_convert::detect::{Kind, detect};
 use image_convert::error::Error;
-use image_convert::{Layout, Pixels, Samples, jpeg, raster, tiff as tif};
+use image_convert::{Layout, Pixels, Samples, jpeg, jxl, raster, tiff as tif};
 use jpeg_encoder::{ColorType as Jpeg, SamplingFactor};
 use png::{BitDepth, ColorType as Png};
 
@@ -45,6 +45,7 @@ fn decode(data: &[u8]) -> Result<Pixels, Error> {
     match detect(data, Path::new("input"))? {
         Kind::Jpeg => jpeg::decode(data),
         Kind::Tiff => tif::decode(data),
+        Kind::Jxl => jxl::decode(data),
         kind => raster::decode(data, kind),
     }
 }
@@ -811,4 +812,49 @@ fn tiff_orientation_profile_and_pages() {
     thumbs[first + 8] = 0;
     let px = decode(&thumbs).unwrap();
     assert_eq!((px.frames, px.warnings.len()), (1, 0));
+}
+
+#[test]
+fn jpeg_xl_lossy_lossless_grey_alpha_animated_and_cmyk() {
+    let source = decode(&fixture("jxl-src.png")).unwrap();
+    let lossless = decode(&fixture("jxl-lossless.jxl")).unwrap();
+    assert_eq!(
+        (lossless.layout, u8s(&lossless)),
+        (Layout::Rgb, u8s(&source))
+    );
+    let lossy = decode(&fixture("jxl-lossy.jxl")).unwrap();
+    let reference = decode(&fixture("jxl-lossy-ref.png")).unwrap();
+    assert!(mean_diff(u8s(&lossy), u8s(&reference)) <= 2.0);
+
+    let grey = decode(&fixture("jxl-grey16.jxl")).unwrap();
+    let grey_source = decode(&fixture("jxl-grey16.png")).unwrap();
+    assert_eq!((grey.layout, grey.bit_depth), (Layout::Grey, 16));
+    assert_eq!(grey.samples, grey_source.samples);
+    let alpha = decode(&fixture("jxl-alpha.jxl")).unwrap();
+    let alpha_source = decode(&fixture("jxl-alpha.png")).unwrap();
+    assert_eq!(
+        (alpha.layout, u8s(&alpha)),
+        (Layout::Rgba, u8s(&alpha_source))
+    );
+
+    let animated = decode(&fixture("jxl-anim.jxl")).unwrap();
+    let first = decode(&fixture("jxl-anim-ref.png")).unwrap();
+    assert_eq!(
+        (animated.frames, animated.warnings[0].code),
+        (2, "first_frame_only")
+    );
+    assert!(mean_diff(&rgb(&animated).concat(), u8s(&first)) <= 2.0);
+
+    // CMYK with alpha comes out as sRGB with alpha, close to libjxl's own rendering.
+    let cmyk = decode(&fixture("jxl-cmyk.jxl")).unwrap();
+    let cmyk_reference = decode(&fixture("jxl-cmyk-ref.png")).unwrap();
+    assert_eq!(
+        (cmyk.layout, cmyk.width, cmyk.height),
+        (Layout::Rgba, 512, 512)
+    );
+    let diff = mean_diff(u8s(&cmyk), u8s(&cmyk_reference));
+    assert!(diff <= 2.0, "{diff}");
+
+    let cut = &fixture("jxl-lossy.jxl")[..600];
+    assert_eq!(decode(cut).unwrap_err().code, "corrupt_image");
 }

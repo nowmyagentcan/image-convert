@@ -11,6 +11,7 @@ publish = false
 fast_image_resize = "6.1.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "ico", "webp"] }
 jpeg-encoder = { version = "0.7.1", features = ["simd"] }
+jxl-oxide = { version = "0.12.6", default-features = false, features = ["moxcms"] }
 moxcms = "0.9.1"
 tiff = "0.11.3"
 zune-jpeg = "0.5.15"

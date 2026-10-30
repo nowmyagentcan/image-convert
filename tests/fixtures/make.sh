@@ -42,3 +42,19 @@ inks = [(c, m, y, k) for c in (0, 180) for m in (30, 200) for y in (0, 90, 230) 
 patches('CMYK', inks).save('color-swop.jpg', quality=100, icc_profile=open(swop, 'rb').read())
 reference(Image.open('color-swop.jpg'), swop, 'color-swop-srgb.png')
 PY
+
+# JPEG XL from cjxl 0.7 (apt install libjxl-tools), lossy with djxl's decode as the reference.
+convert -seed 2 -size 64x48 plasma: -depth 8 png24:jxl-src.png
+cjxl -q 90 jxl-src.png jxl-lossy.jxl
+djxl jxl-lossy.jxl jxl-lossy-ref.png
+cjxl -d 0 jxl-src.png jxl-lossless.jxl
+convert jxl-src.png -colorspace Gray -depth 16 png:jxl-grey16.png
+cjxl -d 0 jxl-grey16.png jxl-grey16.jxl
+convert jxl-src.png \( +clone -fx 'i/w' -colorspace Gray \) -alpha off -compose CopyOpacity -composite png32:jxl-alpha.png
+cjxl -d 0 jxl-alpha.png jxl-alpha.jxl
+convert -delay 10 jxl-src.png \( jxl-src.png -negate \) gif:jxl-anim.gif
+cjxl -d 0 jxl-anim.gif jxl-anim.jxl
+convert "jxl-anim.gif[0]" png24:jxl-anim-ref.png
+rm jxl-anim.gif
+# CMYK with alpha: jxl-cmyk.jxl and jxl-cmyk-ref.png are input.jxl and ref.png of the libjxl
+# conformance case testcases/cmyk_layers (github.com/libjxl/conformance, BSD-3-Clause: LICENSE-libjxl).
