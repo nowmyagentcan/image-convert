@@ -497,3 +497,44 @@ fn opens_the_browser_unless_told_not_to() {
     let url = line.split_whitespace().nth(1).unwrap();
     assert_eq!(fs::read_to_string(&opened).unwrap(), format!("{url}\n"));
 }
+
+#[cfg(windows)]
+#[test]
+fn the_exe_carries_the_icon() {
+    let ico = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon.ico")).unwrap();
+    let exe = fs::read(BIN).unwrap();
+    // The 256 px entry is a PNG, stored in the exe's resources byte for byte.
+    let png = &ico[ico.windows(4).position(|w| w == b"\x89PNG").unwrap()..];
+    assert!(exe.windows(png.len()).any(|w| w == png));
+}
+
+/// A console of its own, as Explorer gives a double-clicked exe: the page starts. Run by CI
+/// (`--ignored`), since it opens the default browser.
+#[cfg(windows)]
+#[test]
+#[ignore = "opens the default browser"]
+fn a_double_click_starts_the_page() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_CONSOLE: u32 = 0x10;
+    let mut child = Command::new(BIN)
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let port = line
+        .strip_prefix("Open http://127.0.0.1:")
+        .and_then(|rest| rest.split_once(' '))
+        .filter(|(_, rest)| rest.ends_with(" close this window to stop.\n"))
+        .unwrap_or_else(|| panic!("{line:?}"))
+        .0;
+    let server = Server {
+        child,
+        port: port.parse().unwrap(),
+    };
+    let (status, _, body) = server.send("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}", b"");
+    assert_eq!((status, body.as_slice()), (200, PAGE.as_bytes()));
+}

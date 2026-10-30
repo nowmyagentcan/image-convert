@@ -29,6 +29,9 @@ jobs:
           # ImageIO and libheif with both plugins must decode both. Windows runners have no
           # Store extensions, so there the tests follow what `formats` reports.
           IMAGE_CONVERT_TEST_REQUIRE: ${{ runner.os != 'Windows' && 'heic,avif' || '' }}
+      - name: A double-clicked exe opens the page (opens the runner's browser)
+        if: runner.os == 'Windows'
+        run: cargo test --locked --test ui -- --ignored --exact a_double_click_starts_the_page
       - name: Formats this runner decodes
         run: cargo test --locked --test decode formats -- --nocapture
       - if: runner.os == 'Linux'

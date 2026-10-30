@@ -1,4 +1,5 @@
-// Compiles libwebp's encoder (vendor/libwebp, a submodule at tag v1.6.0) for src/webp.rs.
+// Compiles libwebp's encoder (vendor/libwebp, a submodule at tag v1.6.0) for src/webp.rs, and
+// gives the Windows exe its icon, which people see when they double-click it.
 fn main() {
     let root = std::path::Path::new("vendor/libwebp");
     let mut build = cc::Build::new();
@@ -18,4 +19,10 @@ fn main() {
         .define("NDEBUG", None)
         .warnings(false)
         .compile("webp");
+    println!("cargo:rerun-if-changed=assets/icon.ico");
+    #[cfg(windows)]
+    winresource::WindowsResource::new()
+        .set_icon("assets/icon.ico")
+        .compile()
+        .expect("the icon resource compiles");
 }
