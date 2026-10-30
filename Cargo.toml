@@ -56,3 +56,10 @@ winresource = "0.1.34"
 [dev-dependencies]
 gif = "0.14.2"
 png = "0.18.1"
+
+# tests/speed.rs reads child processes' peak memory.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62.2", features = ["Win32_System_ProcessStatus"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2.191"

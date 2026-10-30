@@ -621,6 +621,7 @@ dependencies = [
  "image",
  "jpeg-encoder",
  "jxl-oxide",
+ "libc",
  "libloading",
  "moxcms 0.9.1",
  "objc2-core-foundation",
