@@ -9,6 +9,7 @@ pub mod error;
 pub mod jpeg;
 pub mod jxl;
 pub mod raster;
+pub mod raw;
 pub mod resize;
 pub mod svg;
 pub mod tiff;
@@ -248,11 +249,13 @@ fn exif_and_orientation(exif: Option<Vec<u8>>) -> (Option<Vec<u8>>, u8) {
         }
         e
     });
-    let orientation = exif
-        .as_deref()
-        .and_then(image::metadata::Orientation::from_exif_chunk)
-        .map_or(1, |o| o.to_exif());
+    let orientation = exif.as_deref().and_then(exif_orientation).unwrap_or(1);
     (exif, orientation)
+}
+
+/// The Orientation tag of an EXIF or TIFF block (from its TIFF header on), when it has one.
+fn exif_orientation(block: &[u8]) -> Option<u8> {
+    image::metadata::Orientation::from_exif_chunk(block).map(|o| o.to_exif())
 }
 
 /// A copy of an EXIF block with its Orientation (IFD0 tag 274) set to 1, as the pixels are

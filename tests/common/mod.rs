@@ -412,3 +412,56 @@ impl HeifFile {
         file
     }
 }
+
+/// A TIFF entry value: a number stored in the entry, or the offset of a blob.
+pub enum V {
+    N(u32),
+    Blob(usize),
+}
+
+/// A TIFF entry: tag, field type, count, value.
+pub type Entry = (u16, u16, u32, V);
+
+/// A little-endian TIFF-structured file (magic 42, or 0x55 for RW2): `blobs`, then the SubIFDs,
+/// then IFD0, which gets a SubIFDs tag (0x014A) when `subs` isn't empty.
+pub fn raw_tiff(magic: u16, blobs: &[&[u8]], ifd0: &[Entry], subs: &[Vec<Entry>]) -> Vec<u8> {
+    let mut out = b"II".to_vec();
+    out.extend(magic.to_le_bytes());
+    out.extend([0; 4]);
+    let mut at = Vec::new();
+    for blob in blobs {
+        at.push(out.len() as u32);
+        out.extend_from_slice(blob);
+    }
+    let ifd = |out: &mut Vec<u8>, entries: &[Entry], extra: Option<(u32, u32)>| {
+        let start = out.len() as u32;
+        out.extend((entries.len() as u16 + u16::from(extra.is_some())).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            let value = match value {
+                V::N(n) => *n,
+                V::Blob(i) => at[*i],
+            };
+            out.extend([tag.to_le_bytes(), kind.to_le_bytes()].concat());
+            out.extend([count.to_le_bytes(), value.to_le_bytes()].concat());
+        }
+        if let Some((count, value)) = extra {
+            out.extend([&0x014Au16.to_le_bytes()[..], &4u16.to_le_bytes()].concat());
+            out.extend([count.to_le_bytes(), value.to_le_bytes()].concat());
+        }
+        out.extend([0; 4]);
+        start
+    };
+    let offsets: Vec<u32> = subs.iter().map(|s| ifd(&mut out, s, None)).collect();
+    let extra = match offsets[..] {
+        [] => None,
+        [one] => Some((1, one)),
+        _ => {
+            let list = out.len() as u32;
+            offsets.iter().for_each(|o| out.extend(o.to_le_bytes()));
+            Some((offsets.len() as u32, list))
+        }
+    };
+    let first = ifd(&mut out, ifd0, extra);
+    out[4..8].copy_from_slice(&first.to_le_bytes());
+    out
+}

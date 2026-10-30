@@ -10,7 +10,9 @@ use std::path::Path;
 use common::*;
 use image_convert::detect::{Kind, detect};
 use image_convert::error::Error;
-use image_convert::{Layout, Options, Pixels, Samples, bmff, jpeg, jxl, raster, svg, tiff as tif};
+use image_convert::{
+    Layout, Options, Pixels, Samples, bmff, jpeg, jxl, raster, raw, svg, tiff as tif,
+};
 use jpeg_encoder::{ColorType as Jpeg, SamplingFactor};
 use png::{BitDepth, ColorType as Png};
 
@@ -1257,4 +1259,139 @@ fn bmff_finds_cr3_previews_and_cmt1() {
     let found = bmff::cr3(&file).unwrap();
     assert_eq!(found.previews, vec![sample, prvw]);
     assert_eq!(found.cmt1, Some(&exif_orientation(8)[..]));
+}
+
+/// A `width` × `height` JPEG preview, with an EXIF orientation when `orientation` is given.
+fn preview(width: u16, height: u16, orientation: Option<u16>) -> Vec<u8> {
+    let pixels = gradient(width.into(), height.into(), 3);
+    jpeg(width, height, Jpeg::Rgb, &pixels, |e| {
+        if let Some(o) = orientation {
+            e.add_app_segment(1, [&b"Exif\0\0"[..], &exif_orientation(o)].concat())
+                .unwrap();
+        }
+    })
+}
+
+fn jpeg_entries(blob: usize, len: usize) -> Vec<Entry> {
+    vec![
+        (0x201, 4, 1, V::Blob(blob)),
+        (0x202, 4, 1, V::N(len as u32)),
+    ]
+}
+
+#[test]
+fn raw_takes_the_largest_jpeg_preview_with_the_right_orientation() {
+    let (thumb, big) = (preview(160, 120, None), preview(1200, 800, None));
+    // The raw data: a lossless JPEG (SOF3) larger than every preview.
+    let mut lossless = preview(1600, 1000, None);
+    let sof = lossless.windows(2).position(|w| w == [0xff, 0xc0]).unwrap();
+    lossless[sof + 1] = 0xc3;
+    let blobs = [&thumb[..], &big, &lossless];
+    let mut ifd0 = jpeg_entries(0, thumb.len());
+    ifd0.push((0x112, 3, 1, V::N(6)));
+    let strip = vec![
+        (259, 3, 1, V::N(7)),
+        (0x111, 4, 1, V::Blob(2)),
+        (0x117, 4, 1, V::N(lossless.len() as u32)),
+    ];
+    let nef = raw_tiff(42, &blobs, &ifd0, &[jpeg_entries(1, big.len()), strip]);
+    let px = raw::decode(&nef, Kind::Nef).unwrap();
+    assert_eq!((px.width, px.height, px.orientation), (1200, 800, 6));
+    let codes: Vec<_> = px.warnings.iter().map(|w| w.message.as_str()).collect();
+    assert_eq!(
+        codes,
+        ["Converted the camera's embedded preview (1200×800), not a full RAW development."]
+    );
+
+    // The preview's own EXIF orientation wins over IFD0's.
+    let own = preview(1200, 800, Some(3));
+    let pef = raw_tiff(
+        42,
+        &[&own],
+        &[jpeg_entries(0, own.len()), vec![(0x112, 3, 1, V::N(6))]]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
+        &[],
+    );
+    assert_eq!(raw::decode(&pef, Kind::Pef).unwrap().orientation, 3);
+
+    // CR2: an old-style JPEG strip in IFD0, small enough to warn.
+    let cr2 = raw_tiff(
+        42,
+        &[&thumb],
+        &[
+            (259, 3, 1, V::N(6)),
+            (0x111, 4, 1, V::Blob(0)),
+            (0x117, 4, 1, V::N(thumb.len() as u32)),
+        ],
+        &[],
+    );
+    let px = raw::decode(&cr2, Kind::Cr2).unwrap();
+    assert_eq!((px.width, px.orientation), (160, 1));
+    assert_eq!(
+        px.warnings[1].message,
+        "The embedded preview is only 160×120 pixels."
+    );
+}
+
+#[test]
+fn raw_rw2_raf_and_cr3_previews() {
+    let big = preview(1200, 800, None);
+    let rw2 = raw_tiff(
+        0x55,
+        &[&big],
+        &[(0x2E, 7, big.len() as u32, V::Blob(0))],
+        &[],
+    );
+    assert_eq!(&rw2[..4], b"IIU\0");
+    assert_eq!(raw::decode(&rw2, Kind::Rw2).unwrap().width, 1200);
+
+    let mut raf = b"FUJIFILMCCD-RAW 0201FF383501".to_vec();
+    raf.resize(100, 0);
+    raf[84..88].copy_from_slice(&100u32.to_be_bytes());
+    raf[88..92].copy_from_slice(&(big.len() as u32).to_be_bytes());
+    raf.extend(&big);
+    assert_eq!(raw::decode(&raf, Kind::Raf).unwrap().height, 800);
+
+    // Track 1 holds no JPEG here, so the PRVW preview is used, upright by CMT1.
+    let cr3 = cr3(
+        b"not a jpeg, a raw track",
+        &preview(1620, 1080, None),
+        &exif_orientation(8),
+    );
+    let px = raw::decode(&cr3, Kind::Cr3).unwrap();
+    assert_eq!((px.width, px.orientation), (1620, 8));
+}
+
+#[test]
+fn raw_without_a_usable_preview() {
+    // A DNG whose only image is an uncompressed thumbnail, and one whose JPEG is under 1 KB.
+    let thumb = vec![
+        (259, 3, 1, V::N(1)),
+        (0x111, 4, 1, V::Blob(0)),
+        (0x117, 4, 1, V::N(768)),
+    ];
+    let dng = raw_tiff(42, &[&[0; 768]], &thumb, &[]);
+    let err = raw::decode(&dng, Kind::Dng).unwrap_err();
+    assert_eq!(
+        (err.code, err.message.as_str()),
+        (
+            "raw_no_preview",
+            "This Adobe DNG RAW file has no embedded preview image."
+        )
+    );
+    let tiny = preview(8, 8, None);
+    assert!(tiny.len() < 1024);
+    let arw = raw_tiff(42, &[&tiny], &jpeg_entries(0, tiny.len()), &[]);
+    assert_eq!(
+        raw::decode(&arw, Kind::Arw).unwrap_err().code,
+        "raw_no_preview"
+    );
+    assert_eq!(
+        raw::decode(b"II*\0\xff\xff\0\0", Kind::Nef)
+            .unwrap_err()
+            .code,
+        "corrupt_image"
+    );
 }

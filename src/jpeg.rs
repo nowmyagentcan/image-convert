@@ -10,12 +10,12 @@ use crate::{Layout, Pixels, Samples, check_size, exif_and_orientation};
 
 /// What the markers before the first scan say about a JPEG.
 #[derive(Debug, PartialEq, Eq)]
-struct Frame {
+pub(crate) struct Frame {
     /// The SOF marker's second byte, 0xC0 (baseline) to 0xCF.
-    marker: u8,
+    pub(crate) marker: u8,
     precision: u8,
-    width: u32,
-    height: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     components: u8,
     /// The largest horizontal and vertical sampling factors of any component.
     sampling: (u8, u8),
@@ -90,7 +90,7 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
 }
 
 /// Reads the markers up to the first scan: the frame header and any Adobe APP14 transform.
-fn frame(data: &[u8]) -> Result<Frame, Error> {
+pub(crate) fn frame(data: &[u8]) -> Result<Frame, Error> {
     let cut = || Error::corrupt("JPEG", "its header is cut short");
     let byte = |at: usize| data.get(at).copied().ok_or_else(cut);
     let word = |at: usize| Ok::<_, Error>(u16::from_be_bytes([byte(at)?, byte(at + 1)?]));
