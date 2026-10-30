@@ -321,3 +321,94 @@ pub fn base64(data: &[u8]) -> String {
     }
     out
 }
+
+/// An ISO-BMFF box.
+pub fn bx(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut out = ((8 + body.len()) as u32).to_be_bytes().to_vec();
+    out.extend(kind);
+    out.extend(body);
+    out
+}
+
+/// A full box (version, no flags).
+pub fn full(kind: &[u8; 4], version: u8, body: &[u8]) -> Vec<u8> {
+    bx(kind, &[&[version, 0, 0, 0][..], body].concat())
+}
+
+/// A HEIF file: `ftyp`, `mdat`, then `meta`; item locations are offsets into `mdat`.
+#[derive(Default)]
+pub struct HeifFile {
+    pub brand: Option<[u8; 4]>,
+    pub primary: u16,
+    /// (item id, item type).
+    pub items: Vec<(u16, [u8; 4])>,
+    /// (reference type, from, to).
+    pub refs: Vec<([u8; 4], u16, Vec<u16>)>,
+    /// Property boxes in `ipco`, numbered from 1.
+    pub props: Vec<Vec<u8>>,
+    /// (item id, property numbers).
+    pub assoc: Vec<(u16, Vec<u8>)>,
+    /// (item id, construction method, offset, length).
+    pub locations: Vec<(u16, u16, u32, u32)>,
+    pub mdat: Vec<u8>,
+    pub no_meta: bool,
+}
+
+impl HeifFile {
+    pub fn build(&self) -> Vec<u8> {
+        let brand = self.brand.unwrap_or(*b"heic");
+        let mut file = bx(b"ftyp", &[&brand[..], &[0; 4], b"mif1", &brand].concat());
+        let base = (file.len() + 8) as u32;
+        file.extend(bx(b"mdat", &self.mdat));
+        if self.no_meta {
+            return file;
+        }
+        let be16 = |v: u16| v.to_be_bytes();
+        let mut meta = full(b"hdlr", 0, &[&[0; 4][..], b"pict", &[0; 13]].concat());
+        meta.extend(full(b"pitm", 0, &be16(self.primary)));
+        let mut iinf = be16(self.items.len() as u16).to_vec();
+        for (id, ty) in &self.items {
+            iinf.extend(full(
+                b"infe",
+                2,
+                &[&be16(*id)[..], &[0, 0], ty, &[0]].concat(),
+            ));
+        }
+        meta.extend(full(b"iinf", 0, &iinf));
+        let mut iref = Vec::new();
+        for (ty, from, to) in &self.refs {
+            let ids: Vec<u8> = to.iter().flat_map(|&t| be16(t)).collect();
+            iref.extend(bx(
+                ty,
+                &[&be16(*from)[..], &be16(to.len() as u16), &ids].concat(),
+            ));
+        }
+        meta.extend(full(b"iref", 0, &iref));
+        let mut iloc = vec![0x44, 0x40];
+        iloc.extend(be16(self.locations.len() as u16));
+        for &(id, method, offset, length) in &self.locations {
+            iloc.extend(
+                [
+                    &be16(id)[..],
+                    &be16(method),
+                    &[0, 0],
+                    &base.to_be_bytes(),
+                    &[0, 1],
+                ]
+                .concat(),
+            );
+            iloc.extend([offset.to_be_bytes(), length.to_be_bytes()].concat());
+        }
+        meta.extend(full(b"iloc", 1, &iloc));
+        let mut ipma = (self.assoc.len() as u32).to_be_bytes().to_vec();
+        for (id, props) in &self.assoc {
+            ipma.extend(be16(*id));
+            ipma.push(props.len() as u8);
+            ipma.extend(props);
+        }
+        let ipco = bx(b"ipco", &self.props.concat());
+        meta.extend(bx(b"iprp", &[ipco, full(b"ipma", 0, &ipma)].concat()));
+        file.extend(full(b"meta", 0, &meta));
+        file
+    }
+}

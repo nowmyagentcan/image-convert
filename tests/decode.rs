@@ -10,7 +10,7 @@ use std::path::Path;
 use common::*;
 use image_convert::detect::{Kind, detect};
 use image_convert::error::Error;
-use image_convert::{Layout, Options, Pixels, Samples, jpeg, jxl, raster, svg, tiff as tif};
+use image_convert::{Layout, Options, Pixels, Samples, bmff, jpeg, jxl, raster, svg, tiff as tif};
 use jpeg_encoder::{ColorType as Jpeg, SamplingFactor};
 use png::{BitDepth, ColorType as Png};
 
@@ -1026,4 +1026,235 @@ fn svgz_is_inflated_under_a_cap() {
         svg::ungzip(b"\x1f\x8b\x08junk").unwrap_err().code,
         "corrupt_image"
     );
+}
+
+fn ispe(width: u32, height: u32) -> Vec<u8> {
+    full(
+        b"ispe",
+        0,
+        &[width.to_be_bytes(), height.to_be_bytes()].concat(),
+    )
+}
+
+/// An HEVC primary item with its size, P3 nclx colour, irot 1, imir 0, alpha and EXIF.
+fn iphone_like() -> HeifFile {
+    let mut exif = vec![0, 0, 0, 0];
+    exif.extend(exif_orientation(6));
+    let alpha = b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0";
+    HeifFile {
+        primary: 1,
+        items: vec![(1, *b"hvc1"), (2, *b"Exif"), (3, *b"hvc1")],
+        refs: vec![(*b"cdsc", 2, vec![1]), (*b"auxl", 3, vec![1])],
+        props: vec![
+            ispe(4032, 3024),
+            bx(
+                b"colr",
+                &[&b"nclx"[..], &[0, 12, 0, 13, 0, 6, 0x80]].concat(),
+            ),
+            bx(b"irot", &[1]),
+            bx(b"imir", &[0]),
+            full(b"auxC", 0, alpha),
+        ],
+        assoc: vec![(1, vec![0x81, 2, 3, 4]), (3, vec![1, 5])],
+        locations: vec![(1, 0, 0, 4), (2, 0, 4, exif.len() as u32), (3, 0, 0, 4)],
+        mdat: [&[0; 4][..], &exif].concat(),
+        ..HeifFile::default()
+    }
+}
+
+#[test]
+fn bmff_reads_the_primary_item_and_its_properties() {
+    let file = iphone_like().build();
+    let info = bmff::heif(&file, Kind::Heic).unwrap();
+    let expected = bmff::Heif {
+        kind: Kind::Heic,
+        width: 4032,
+        height: 3024,
+        colour: Some(bmff::Colour::Cicp {
+            primaries: 12,
+            transfer: 13,
+            matrix: 6,
+            full_range: true,
+        }),
+        rotation: 1,
+        mirror: Some(0),
+        alpha: true,
+        exif: Some(exif_orientation(6)),
+        sequence: false,
+    };
+    assert_eq!(info, expected);
+    assert_eq!(info.orientation(), 7);
+
+    // A grid of AV1 tiles is AVIF whatever the brand says; its own data may sit in idat.
+    let mut grid = iphone_like();
+    grid.primary = 9;
+    grid.items
+        .extend([(9, *b"grid"), (10, *b"av01"), (11, *b"av01")]);
+    grid.refs.push((*b"dimg", 9, vec![10, 11]));
+    grid.props[0] = ispe(1024, 512);
+    grid.props[1] = bx(b"colr", &[&b"prof"[..], &profile(40)].concat());
+    grid.assoc.push((9, vec![1, 2]));
+    grid.locations
+        .extend([(9, 1, 0, 8), (10, 0, 0, 4), (11, 0, 0, 4)]);
+    let info = bmff::heif(&grid.build(), Kind::Heic).unwrap();
+    assert_eq!(
+        (info.kind, info.width, info.rotation),
+        (Kind::Avif, 1024, 0)
+    );
+    assert_eq!(info.colour, Some(bmff::Colour::Icc(profile(40))));
+    assert_eq!((info.alpha, info.exif), (false, None));
+
+    // A tone-mapped primary goes by its base image.
+    let mut tmap = iphone_like();
+    tmap.primary = 9;
+    tmap.items.push((9, *b"tmap"));
+    tmap.refs.push((*b"dimg", 9, vec![1]));
+    tmap.assoc.push((9, vec![1]));
+    assert_eq!(
+        bmff::heif(&tmap.build(), Kind::Avif).unwrap().kind,
+        Kind::Heic
+    );
+}
+
+#[test]
+fn bmff_refuses_the_variants_the_os_decoders_never_see() {
+    let message = |file: &HeifFile| bmff::heif(&file.build(), Kind::Heic).unwrap_err().message;
+    let no_meta = HeifFile {
+        no_meta: true,
+        ..iphone_like()
+    };
+    assert_eq!(
+        message(&no_meta),
+        "HEIF with no primary image isn't supported."
+    );
+    for (ty, variant) in [
+        (b"jpeg", "JPEG compression"),
+        (b"j2k1", "JPEG 2000 compression"),
+        (b"unci", "no compression (unci)"),
+        (b"vvc1", "VVC compression"),
+        (b"evc1", "EVC compression"),
+        (b"mski", "'mski' compression"),
+        (b"iovl", "overlay images"),
+        (b"iden", "identity-derived images"),
+    ] {
+        let mut file = iphone_like();
+        file.items[0].1 = *ty;
+        assert_eq!(
+            message(&file),
+            format!("HEIF with {variant} isn't supported.")
+        );
+    }
+    let mut idat = iphone_like();
+    idat.locations[0].1 = 1;
+    assert_eq!(
+        message(&idat),
+        "HEIF with item data in idat or another item isn't supported."
+    );
+    let mut outside = iphone_like();
+    outside.locations[0].2 = 1 << 30;
+    assert_eq!(
+        bmff::heif(&outside.build(), Kind::Heic).unwrap_err().code,
+        "corrupt_image"
+    );
+    let mut huge = iphone_like();
+    huge.props[0] = ispe(70_000, 10);
+    assert_eq!(
+        bmff::heif(&huge.build(), Kind::Heic).unwrap_err().code,
+        "image_too_large"
+    );
+    let mut sizeless = iphone_like();
+    sizeless.assoc[0].1.retain(|&p| p & 0x7f != 1);
+    assert_eq!(
+        bmff::heif(&sizeless.build(), Kind::Heic).unwrap_err().code,
+        "corrupt_image"
+    );
+}
+
+#[test]
+fn bmff_limits_end_in_corrupt_image() {
+    // A file cut inside its last box, and one with too many boxes.
+    let mut cut = iphone_like().build();
+    cut.truncate(cut.len() - 3);
+    let err = bmff::heif(&cut, Kind::Heic).unwrap_err();
+    assert_eq!(
+        err.message,
+        "Can't decode this HEIF file: a box runs past its end."
+    );
+    let many: Vec<u8> = (0..10_001).flat_map(|_| bx(b"free", &[])).collect();
+    let err = bmff::heif(&[bx(b"ftyp", b"heic\0\0\0\0"), many].concat(), Kind::Heic).unwrap_err();
+    assert_eq!(
+        err.message,
+        "Can't decode this HEIF file: it has more than 10,000 boxes."
+    );
+}
+
+/// A CR3 with a JPEG as track 1's first sample, a `PRVW` preview and a `CMT1` block.
+fn cr3(sample: &[u8], prvw: &[u8], cmt1: &[u8]) -> Vec<u8> {
+    let metadata = [
+        &[
+            0x85, 0xc0, 0xb6, 0x87, 0x82, 0x0f, 0x11, 0xe0, 0x81, 0x11, 0xf4, 0xce, 0x46, 0x2b,
+            0x6a, 0x48,
+        ][..],
+        &bx(b"CNCV", b"CanonCR3"),
+        &bx(b"CMT1", cmt1),
+    ]
+    .concat();
+    let preview = [
+        &[
+            0xea, 0xf4, 0x2b, 0x5e, 0x1c, 0x98, 0x4b, 0x88, 0xb9, 0xfb, 0xb7, 0xdc, 0x40, 0x6e,
+            0x4d, 0x16,
+        ][..],
+        &[0; 8],
+        &bx(
+            b"PRVW",
+            &[
+                &[0, 0, 0, 0, 0, 1, 0, 8, 0, 8, 0, 1][..],
+                &(prvw.len() as u32).to_be_bytes(),
+                prvw,
+            ]
+            .concat(),
+        ),
+    ]
+    .concat();
+    let ftyp = bx(b"ftyp", b"crx \0\0\0\x01crx isom");
+    let stbl = |offset: u32| {
+        let stsz = full(
+            b"stsz",
+            0,
+            &[
+                0u32.to_be_bytes(),
+                1u32.to_be_bytes(),
+                (sample.len() as u32).to_be_bytes(),
+            ]
+            .concat(),
+        );
+        let stco = full(
+            b"stco",
+            0,
+            &[1u32.to_be_bytes(), offset.to_be_bytes()].concat(),
+        );
+        bx(
+            b"trak",
+            &bx(b"mdia", &bx(b"minf", &bx(b"stbl", &[stsz, stco].concat()))),
+        )
+    };
+    let moov_len = bx(b"moov", &[bx(b"uuid", &metadata), stbl(0)].concat()).len();
+    let offset = ftyp.len() + moov_len + bx(b"uuid", &preview).len() + 8;
+    let moov = bx(
+        b"moov",
+        &[bx(b"uuid", &metadata), stbl(offset as u32)].concat(),
+    );
+    [ftyp, moov, bx(b"uuid", &preview), bx(b"mdat", sample)].concat()
+}
+
+#[test]
+fn bmff_finds_cr3_previews_and_cmt1() {
+    let (sample, prvw) = (
+        b"\xff\xd8\xff\xe0track".as_slice(),
+        b"\xff\xd8\xff\xdbprvw".as_slice(),
+    );
+    let file = cr3(sample, prvw, &exif_orientation(8));
+    let found = bmff::cr3(&file).unwrap();
+    assert_eq!(found.previews, vec![sample, prvw]);
+    assert_eq!(found.cmt1, Some(&exif_orientation(8)[..]));
 }

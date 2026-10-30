@@ -1,6 +1,7 @@
 //! The image-convert engine: input detection, decoders that share one decoded-image type, and
 //! the pixel pipeline from there to an encoded PNG, JPEG or WebP.
 
+pub mod bmff;
 pub mod color;
 pub mod detect;
 pub mod encode;
