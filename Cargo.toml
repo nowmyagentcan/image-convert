@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "ico", "webp"] }
+moxcms = "0.9.1"
 zune-jpeg = "0.5.15"
 
 [profile.dev]

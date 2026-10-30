@@ -1,5 +1,7 @@
-//! The image-convert engine: input detection and decoders that share one decoded-image type.
+//! The image-convert engine: input detection, decoders that share one decoded-image type, and
+//! the pixel pipeline to sRGB.
 
+pub mod color;
 pub mod detect;
 pub mod error;
 pub mod jpeg;
@@ -59,6 +61,15 @@ pub struct Pixels {
     /// Frames or pages in the file, 1 when unknown.
     pub frames: u32,
     pub warnings: Vec<Warning>,
+}
+
+/// An 8-bit sRGB image: grey, grey + alpha, RGB or RGBA, laid out as [`Pixels`] samples are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub layout: Layout,
+    pub data: Vec<u8>,
 }
 
 /// Refuses a header size of 0, or over 65,535 px per side or 200 megapixels, before decoding.
