@@ -10,7 +10,7 @@ use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::fontdb::Source;
 use resvg::usvg::{ImageHrefResolver, Options as Parse, Tree};
 
-use crate::detect::{Kind, detect};
+use crate::detect::{Kind, detect, find};
 use crate::error::{Error, Warning};
 use crate::{Layout, Options, Pixels, Samples, resize};
 
@@ -127,8 +127,4 @@ fn nested_entities(data: &[u8]) -> bool {
         rest = &rest[close..];
     }
     false
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
 }

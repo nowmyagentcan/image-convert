@@ -90,11 +90,9 @@ impl<'a> Reader<'a> {
         Ok(bytes.iter().fold(0, |n, &b| n << 8 | u64::from(b)))
     }
 
-    /// The boxes between `start` and `end`, `depth` levels down.
-    fn boxes(&self, start: usize, end: usize, depth: usize) -> Result<Vec<Bx>, Error> {
-        if depth > 16 {
-            return Err(self.corrupt("its boxes nest more than 16 levels deep"));
-        }
+    /// The boxes between `start` and `end`. Callers descend fixed paths at most 5 deep, so the
+    /// 16-level limit holds by construction.
+    fn boxes(&self, start: usize, end: usize) -> Result<Vec<Bx>, Error> {
         let mut found = Vec::new();
         let mut at = start;
         while at + 8 <= end {
@@ -124,8 +122,8 @@ impl<'a> Reader<'a> {
     }
 
     /// The children of `parent`, whose own fields take `skip` bytes first.
-    fn children(&self, parent: Bx, skip: usize, depth: usize) -> Result<Vec<Bx>, Error> {
-        self.boxes(parent.start + skip, parent.end, depth)
+    fn children(&self, parent: Bx, skip: usize) -> Result<Vec<Bx>, Error> {
+        self.boxes(parent.start + skip, parent.end)
     }
 }
 
@@ -146,11 +144,11 @@ pub fn heif(data: &[u8], kind: Kind) -> Result<Heif, Error> {
         count: Cell::new(0),
     };
     let refuse = |variant: &str| Error::unsupported_variant(&label, variant);
-    let top = r.boxes(0, data.len(), 0)?;
+    let top = r.boxes(0, data.len())?;
     let sequence = find(&top, b"moov").is_some();
     let no_primary = || refuse("no primary image");
     let meta = find(&top, b"meta").ok_or_else(no_primary)?;
-    let meta = r.children(meta, 4, 1)?;
+    let meta = r.children(meta, 4)?;
     let handler = find(&meta, b"hdlr")
         .map(|h| r.get(h.start + 8, 4))
         .transpose()?;
@@ -158,18 +156,16 @@ pub fn heif(data: &[u8], kind: Kind) -> Result<Heif, Error> {
     if handler != Some(b"pict") {
         return Err(no_primary());
     }
-    let wide = |b: Bx, v1: u8| -> Result<(bool, usize), Error> {
-        let version = r.uint(b.start, 1)? as u8;
-        Ok((version >= v1, if version >= v1 { 4 } else { 2 }))
-    };
-    let (_, id_len) = wide(pitm, 1)?;
+    // Ids and counts are 2 bytes in version 0 boxes and 4 bytes from version 1.
+    let wide = |b: Bx| Ok::<_, Error>(if r.uint(b.start, 1)? >= 1 { 4 } else { 2 });
+    let id_len = wide(pitm)?;
     let primary = r.uint(pitm.start + 4, id_len)? as u32;
 
     // Item types from iinf.
     let mut types = Vec::new();
     if let Some(iinf) = find(&meta, b"iinf") {
-        let (_, count_len) = wide(iinf, 1)?;
-        for infe in r.children(iinf, 4 + count_len, 2)? {
+        let count_len = wide(iinf)?;
+        for infe in r.children(iinf, 4 + count_len)? {
             if &infe.kind != b"infe" {
                 continue;
             }
@@ -191,8 +187,8 @@ pub fn heif(data: &[u8], kind: Kind) -> Result<Heif, Error> {
     // References: (type, from, to).
     let mut refs = Vec::new();
     if let Some(iref) = find(&meta, b"iref") {
-        let (_, id_len) = wide(iref, 1)?;
-        for reference in r.children(iref, 4, 2)? {
+        let id_len = wide(iref)?;
+        for reference in r.children(iref, 4)? {
             let from = r.uint(reference.start, id_len)? as u32;
             let count = r.uint(reference.start + id_len, 2)? as usize;
             for i in 0..count {
@@ -311,9 +307,9 @@ pub fn heif(data: &[u8], kind: Kind) -> Result<Heif, Error> {
     let mut props = Vec::new();
     let mut assigned = Vec::new();
     if let Some(iprp) = find(&meta, b"iprp") {
-        let iprp = r.children(iprp, 0, 2)?;
+        let iprp = r.children(iprp, 0)?;
         if let Some(ipco) = find(&iprp, b"ipco") {
-            props = r.children(ipco, 0, 3)?;
+            props = r.children(ipco, 0)?;
         }
         if let Some(ipma) = find(&iprp, b"ipma") {
             let version = r.uint(ipma.start, 1)?;
@@ -431,26 +427,26 @@ pub fn cr3(data: &[u8]) -> Result<Cr3<'_>, Error> {
         format: "CR3",
         count: Cell::new(0),
     };
-    let top = r.boxes(0, data.len(), 0)?;
+    let top = r.boxes(0, data.len())?;
     let mut previews = Vec::new();
     let mut cmt1 = None;
     if let Some(moov) = find(&top, b"moov") {
-        let moov = r.children(moov, 0, 1)?;
+        let moov = r.children(moov, 0)?;
         let canon = moov.iter().find(|b| {
             &b.kind == b"uuid" && data.get(b.start..b.start + 16) == Some(&CANON_METADATA)
         });
         if let Some(&canon) = canon {
-            let tags = r.children(canon, 16, 2)?;
+            let tags = r.children(canon, 16)?;
             cmt1 = find(&tags, b"CMT1").map(|b| &data[b.start..b.end]);
         }
         if let Some(trak) = find(&moov, b"trak") {
-            let mut level = r.children(trak, 0, 2)?;
-            for (depth, kind) in [(3, b"mdia"), (4, b"minf"), (5, b"stbl")] {
+            let mut level = r.children(trak, 0)?;
+            for kind in [b"mdia", b"minf", b"stbl"] {
                 let Some(b) = find(&level, kind) else {
                     level = Vec::new();
                     break;
                 };
-                level = r.children(b, 0, depth)?;
+                level = r.children(b, 0)?;
             }
             let offset = match (find(&level, b"stco"), find(&level, b"co64")) {
                 (Some(stco), _) => Some(r.uint(stco.start + 8, 4)?),
@@ -474,7 +470,7 @@ pub fn cr3(data: &[u8]) -> Result<Cr3<'_>, Error> {
         .iter()
         .find(|b| &b.kind == b"uuid" && data.get(b.start..b.start + 16) == Some(&CANON_PREVIEW));
     if let Some(&uuid) = uuid
-        && let Some(prvw) = find(&r.children(uuid, 24, 1)?, b"PRVW")
+        && let Some(prvw) = find(&r.children(uuid, 24)?, b"PRVW")
     {
         let body = &data[prvw.start..prvw.end];
         let jpeg = body.windows(3).take(32).position(|w| w == b"\xff\xd8\xff");

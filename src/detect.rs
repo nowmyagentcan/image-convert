@@ -182,7 +182,7 @@ fn out_of_scope(head: &[u8]) -> Error {
 /// Whether IFD0 of a TIFF-structured file has the DNGVersion tag (0xC612).
 fn has_dng_version(data: &[u8]) -> bool {
     Tiff::new(data)
-        .and_then(|(tiff, first)| tiff.ifd(first, 0))
+        .and_then(|(tiff, first)| tiff.ifd(first))
         .is_some_and(|(ifd, _)| ifd.get(0xC612).is_some())
 }
 
@@ -248,7 +248,7 @@ fn is_svg(head: &[u8]) -> bool {
     }
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 

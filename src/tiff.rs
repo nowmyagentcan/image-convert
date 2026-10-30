@@ -26,12 +26,11 @@ pub struct Entry {
     pub at: usize,
 }
 
-/// An image file directory and how deep it lies (0 for the main chain, 1 for its SubIFDs, …).
+/// An image file directory.
 #[derive(Debug, Clone)]
 pub struct Ifd<'a> {
     tiff: Tiff<'a>,
     pub offset: usize,
-    pub depth: u8,
     pub entries: Vec<Entry>,
 }
 
@@ -81,7 +80,7 @@ impl<'a> Tiff<'a> {
 
     /// The IFD at `offset` and the offset of the next one (0 at the end of the chain or of the
     /// file); `None` when it lies outside the file or has more than 4,096 entries.
-    pub fn ifd(&self, offset: usize, depth: u8) -> Option<(Ifd<'a>, usize)> {
+    pub fn ifd(&self, offset: usize) -> Option<(Ifd<'a>, usize)> {
         let count = usize::from(self.u16(offset)?);
         if count > MAX_ENTRIES {
             return None;
@@ -110,7 +109,6 @@ impl<'a> Tiff<'a> {
         let ifd = Ifd {
             tiff: *self,
             offset,
-            depth,
             entries,
         };
         Some((ifd, next))
@@ -127,7 +125,7 @@ impl<'a> Tiff<'a> {
             i += 1;
             while offset != 0 && found.len() < MAX_IFDS && found.iter().all(|f| f.offset != offset)
             {
-                let Some((ifd, next)) = self.ifd(offset, depth) else {
+                let Some((ifd, next)) = self.ifd(offset) else {
                     break;
                 };
                 if nested && depth < MAX_DEPTH {
@@ -209,7 +207,7 @@ pub fn check(data: &[u8]) -> Result<Page, Error> {
         return Err(Error::unsupported_variant("TIFF", "BigTIFF"));
     }
     let ifd = Tiff::new(data)
-        .and_then(|(tiff, first)| tiff.ifd(first, 0))
+        .and_then(|(tiff, first)| tiff.ifd(first))
         .ok_or_else(|| Error::corrupt("TIFF", "its first directory lies outside the file"))?
         .0;
     let refuse = |variant: String| Err(Error::unsupported_variant("TIFF", variant));
@@ -478,7 +476,7 @@ mod tests {
         for big in [false, true] {
             let data = tiff(big, RGB, 0);
             let (t, first) = Tiff::new(&data).unwrap();
-            let (ifd, next) = t.ifd(first, 0).unwrap();
+            let (ifd, next) = t.ifd(first).unwrap();
             assert_eq!(
                 (ifd.value(256), ifd.values(258), next),
                 (Some(4), vec![8, 8, 8], 0)
@@ -499,7 +497,7 @@ mod tests {
         let mut huge = b"II*\0\x08\0\0\0".to_vec();
         huge.extend(4097u16.to_le_bytes());
         huge.resize(8 + 2 + 12 * 4097 + 4, 0);
-        assert!(Tiff::new(&huge).unwrap().0.ifd(8, 0).is_none());
+        assert!(Tiff::new(&huge).unwrap().0.ifd(8).is_none());
     }
 
     #[test]

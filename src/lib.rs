@@ -263,7 +263,7 @@ fn exif_orientation(block: &[u8]) -> Option<u8> {
 fn upright_exif(exif: &[u8]) -> Vec<u8> {
     let mut out = exif.to_vec();
     let entry = tiff::Tiff::new(exif)
-        .and_then(|(t, first)| t.ifd(first, 0))
+        .and_then(|(t, first)| t.ifd(first))
         .and_then(|(ifd, _)| ifd.get(0x112).copied());
     if let Some(e) = entry.filter(|e| e.kind == 3) {
         let one = if exif.starts_with(b"MM") {
