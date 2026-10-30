@@ -11,6 +11,7 @@ use std::time::Duration;
 use image_convert::engine::{FileResult, Report};
 use image_convert::os::FormatStatus;
 
+pub const BOLD: &str = "1";
 pub const DIM: &str = "2";
 const RED: &str = "31";
 const GREEN: &str = "32";

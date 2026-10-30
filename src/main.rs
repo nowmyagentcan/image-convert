@@ -1,9 +1,11 @@
-//! The command line: `image-convert [convert] <PATH>... [OPTIONS]` and `image-convert formats`.
+//! The command line: `image-convert [convert] <PATH>... [OPTIONS]`, `image-convert formats`, and
+//! interactive mode when started with no arguments in a terminal.
 
+mod interactive;
 mod text;
 
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
@@ -276,6 +278,18 @@ fn main() -> ExitCode {
             return finish(formats(cli.json, &mut out).map(|()| 0));
         }
         _ => {}
+    }
+    if args.len() == 1 && io::stdin().is_terminal() && io::stdout().is_terminal() {
+        let mut out = Out::new(io::stdout().lock(), Look::stdout());
+        let mut err = Out::new(io::stderr(), Look::stderr());
+        let convert = |paths: Vec<PathBuf>, out: &mut _, err: &mut _| {
+            let inputs = paths::expand(&paths, false, None);
+            let cli = Cli::default();
+            let options = Options::default();
+            convert(&cli, &options, &Target::Beside, &inputs, out, err).map(drop)
+        };
+        let run = interactive::run(io::stdin().lock(), &mut out, &mut err, convert);
+        return finish(run.map(|()| 0));
     }
     let json = args
         .iter()

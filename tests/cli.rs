@@ -659,6 +659,21 @@ fn exit_codes_follow_what_converted_and_what_failed() {
 }
 
 #[test]
+fn only_an_exact_first_word_is_a_command_and_options_go_anywhere() {
+    let dir = folder("words");
+    fs::write(dir.join("-a.png"), small_png()).unwrap();
+    fs::write(dir.join("formats"), small_png()).unwrap();
+    let after = run(&dir, &["--to", "jpeg", "--", "-a.png", "--json"], None);
+    assert_eq!(after.code, 1, "after -- even --json is a path");
+    assert!(dir.join("-a.jpg").exists());
+    let path = run(&dir, &["./formats", "--to", "webp"], None);
+    assert_eq!(path.code, 0, "{}", path.stderr);
+    assert!(dir.join("formats.webp").exists());
+    let convert = run(&dir, &["convert", "--to", "png", "formats", "--json"], None);
+    assert_eq!(convert.json()["files"][0]["output"], "formats.png");
+}
+
+#[test]
 fn debug_shows_the_decoder_and_steps_on_stderr_only() {
     let dir = folder("debug");
     fs::write(dir.join("a.png"), small_png()).unwrap();
@@ -820,4 +835,61 @@ fn control_and_bidi_characters_in_names_never_reach_the_terminal() {
         name,
         "JSON keeps the name as it is"
     );
+}
+
+/// Interactive mode in a real terminal, through util-linux `script`, which gives the binary a
+/// pseudo-terminal and types `typed` into it.
+#[cfg(target_os = "linux")]
+fn terminal(dir: &Path, typed: &str, no_color: bool) -> String {
+    let mut script = Command::new("script");
+    script
+        .args(["-qec", env!("CARGO_BIN_EXE_image-convert"), "/dev/null"])
+        .current_dir(dir)
+        .env_remove("NO_COLOR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    if no_color {
+        script.env("NO_COLOR", "1");
+    }
+    let mut child = script.spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(typed.as_bytes()).unwrap();
+    drop(input);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap().replace("\r\n", "\n")
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn interactive_mode_converts_dropped_paths_in_a_terminal() {
+    let dir = folder("interactive");
+    fs::write(dir.join("a b.png"), small_png()).unwrap();
+    let typed = "'a b.png'\n/help\n/quit\na\\ b.png\n";
+    let plain = terminal(&dir, typed, true);
+    assert!(!plain.contains("\x1b["), "{plain}");
+    let size = fs::metadata(dir.join("a b-1.png")).unwrap().len();
+    for part in [
+        "\n╭─────",
+        "│ ✻ image-convert 0.1.0 ",
+        "│   Convert images agents and apps can't open to PNG, JPEG or WebP. │\n",
+        "\n  Drop files here or type paths · /help · /quit\n\n› ",
+        &format!("  ✓ a b.png → a b-1.png  16×12 PNG  {size} bytes\n\n› "),
+        "  /quit   leave (Ctrl+C works too)\n\n› ",
+    ] {
+        assert!(plain.contains(part), "{part}\n{plain}");
+    }
+    // Lines after /quit aren't read.
+    assert!(!dir.join("a b-2.png").exists());
+    let colour = terminal(&dir, "a\\ b.png\n", false);
+    assert!(
+        colour.contains("\x1b[1m✻ image-convert\x1b[0m 0.1.0"),
+        "{colour}"
+    );
+    assert!(colour.contains("  \x1b[32m✓\x1b[0m a b.png \x1b[2m→\x1b[0m a b-2.png  16×12 PNG"));
+
+    // Without a terminal the same start is a usage error.
+    let piped = run(&dir, &[], Some(b"a\\ b.png\n"));
+    assert_eq!((piped.code, piped.stdout.as_str()), (2, ""));
+    assert!(piped.stderr.starts_with("✗ No file given.\n"));
 }
