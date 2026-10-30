@@ -1,0 +1,210 @@
+# A v* tag builds every target into a draft release with SHA256SUMS and build attestations.
+# Running it by hand (workflow_dispatch) is the dry run: the same archives and smokes, no release.
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, target: windows-x64 }
+          - { os: macos-latest, target: macos-arm64 }
+          - { os: macos-15-intel, target: macos-x64 }
+          # Ubuntu 22.04 sets the floor at glibc 2.35. Not static musl: the system libheif is
+          # opened at run time, which needs a glibc-linked binary.
+          - { os: ubuntu-latest, target: linux-x64, container: 'ubuntu:22.04' }
+          - { os: ubuntu-24.04-arm, target: linux-arm64, container: 'ubuntu:22.04' }
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    env:
+      RUSTFLAGS: ${{ matrix.target == 'windows-x64' && '-C target-feature=+crt-static' || '' }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - if: matrix.container
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gcc libc6-dev git curl ca-certificates
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Sign (off until certificates exist; add the secrets, then remove the if)
+        if: false
+        shell: bash
+        run: echo "signtool on Windows, codesign and notarytool on macOS"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: target/release/image-convert${{ runner.os == 'Windows' && '.exe' || '' }}
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - uses: actions/download-artifact@v8
+        with:
+          path: bin
+      - name: Archive
+        run: |
+          v=v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          [ "$GITHUB_REF_TYPE" != tag ] || [ "$GITHUB_REF_NAME" = "$v" ]
+          cargo about generate --locked -c scripts/about.toml scripts/about.hbs -o THIRD-PARTY-LICENSES.txt
+          # A licence text cargo-about filled from a template has no real copyright line.
+          if grep -nE '<(year|owner|copyright holders)>' THIRD-PARTY-LICENSES.txt; then exit 1; fi
+          # libwebp is compiled in by build.rs, not a crate, so cargo-about doesn't see it.
+          { echo; echo ================================================================================
+            echo 'libwebp 1.6.0 (the WebP encoder, compiled in): COPYING and PATENTS'
+            echo --------------------------------------------------------------------------------; echo
+            cat vendor/libwebp/COPYING; echo; cat vendor/libwebp/PATENTS; } >> THIRD-PARTY-LICENSES.txt
+          mkdir dist
+          for t in $(ls bin); do
+            n=image-convert-$v-$t
+            mkdir "$n" && cp bin/$t/* LICENSE THIRD-PARTY-LICENSES.txt "$n"/ && chmod +x "$n"/image-convert*
+            cp README.md "$n"/ 2>/dev/null || [ "$GITHUB_REF_TYPE" != tag ]
+            if [ "$t" = windows-x64 ]; then (cd "$n" && zip -q ../dist/"$n".zip *)
+            else (cd "$n" && tar -czf ../dist/"$n".tar.gz *); fi
+          done
+          for f in install.sh install.ps1; do sed "s/@VERSION@/$v/g" scripts/$f > dist/$f; done
+          cd dist && sha256sum * > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/*
+  smoke:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: windows-x64 }
+          - { os: macos-latest, target: macos-arm64 }
+          - { os: macos-15-intel, target: macos-x64 }
+          - { os: ubuntu-latest, target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - name: Run the archive
+        run: |
+          mkdir x && cd x
+          if [ ${{ matrix.target }} = windows-x64 ]; then unzip -q ../dist/*-windows-x64.zip
+          else tar -xzf ../dist/*-${{ matrix.target }}.tar.gz; fi
+          case $RUNNER_OS in
+            Windows)
+              if grep -qiaE 'vcruntime|msvcp|api-ms-win-crt' image-convert.exe; then echo 'needs the VC++ runtime'; exit 1; fi ;;
+            Linux)
+              # Only glibc's own libraries: libheif is opened at run time, never linked.
+              if ldd image-convert | grep -vE 'linux-vdso|ld-linux|/lib(c|m|dl|pthread|gcc_s)\.so'; then exit 1; fi
+              newest=$({ echo GLIBC_2.35; objdump -T image-convert | grep -oE 'GLIBC_[0-9.]+'; } | sort -uV | tail -n 1)
+              [ "$newest" = GLIBC_2.35 ] ;;
+            macOS)
+              otool -l image-convert | grep -E 'minos 11\.0$' ;;
+          esac
+          test -s LICENSE && test -s THIRD-PARTY-LICENSES.txt
+          ./image-convert --version | grep -x 'image-convert [0-9.]*'
+      - name: Copy the files with wrong checksums
+        run: mkdir bad && cp dist/* bad/ && sed -i.bak 's/^./x/' bad/SHA256SUMS
+      # The installers are tested here, on throwaway runners, because they edit the user's PATH.
+      - name: install.sh with sh, bash and zsh
+        if: runner.os != 'Windows'
+        run: |
+          python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &
+          sleep 2
+          if IMAGE_CONVERT_BASE=http://127.0.0.1:8765/bad sh dist/install.sh; then exit 1; fi
+          test ! -e ~/.local/bin/image-convert
+          for s in sh bash zsh; do
+            command -v $s >/dev/null || continue
+            rm -f ~/.local/bin/image-convert
+            IMAGE_CONVERT_BASE=http://127.0.0.1:8765/dist $s dist/install.sh
+          done
+          ~/.local/bin/image-convert --version
+          cmp x/LICENSE ~/.local/share/doc/image-convert/LICENSE
+          cmp x/THIRD-PARTY-LICENSES.txt ~/.local/share/doc/image-convert/THIRD-PARTY-LICENSES.txt
+      - name: install.sh stops on systems older than glibc 2.35 or without glibc
+        if: matrix.target == 'linux-x64'
+        run: |
+          for image in debian:11 alpine:3; do
+            out=$(docker run --rm -v "$PWD/dist:/d" $image sh /d/install.sh 2>&1) && exit 1
+            echo "$out" | grep -F 'needs glibc 2.35 or newer'
+          done
+      - name: install.ps1 with Windows PowerShell and PowerShell 7
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Start-Process python '-m http.server 8765 --bind 127.0.0.1' -WindowStyle Hidden
+          Start-Sleep 2
+          $dir = "$env:LOCALAPPDATA\Programs\image-convert"
+          $env:IMAGE_CONVERT_BASE = 'http://127.0.0.1:8765/bad'
+          powershell -NoProfile -File dist/install.ps1
+          if (!$LASTEXITCODE -or (Test-Path $dir)) { throw 'installed despite wrong checksums' }
+          $env:IMAGE_CONVERT_BASE = 'http://127.0.0.1:8765/dist'
+          foreach ($ps in 'powershell', 'pwsh') {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+            & $ps -NoProfile -File dist/install.ps1
+            if ($LASTEXITCODE) { throw "install.ps1 failed in $ps" }
+          }
+          # A new shell finds it through the user PATH alone.
+          powershell -NoProfile -Command '$env:Path = [Environment]::GetEnvironmentVariable(''Path'', ''User''); image-convert --version'
+          # Other files in the folder stay.
+          Set-Content "$dir\notes.old" 'kept'
+          powershell -NoProfile -File dist/install.ps1
+          $files = Get-ChildItem $dir -Name
+          if ($LASTEXITCODE -or (Compare-Object $files 'notes.old', 'image-convert.exe', 'LICENSE', 'THIRD-PARTY-LICENSES.txt')) { throw "left $files" }
+          Remove-Item "$dir\notes.old"
+          # An upgrade from an archive without the exe, with one that doesn't run, or without a
+          # licence file keeps the installed files.
+          $zip = (Get-Item dist/*-windows-x64.zip).Name
+          New-Item -ItemType Directory missing, invalid, nonotice, payload | Out-Null
+          Compress-Archive dist/SHA256SUMS "missing/$zip"
+          [IO.File]::WriteAllBytes("$PWD/payload/image-convert.exe", [byte[]](0, 1, 2, 3))
+          Compress-Archive payload/image-convert.exe "invalid/$zip"
+          Expand-Archive "dist/$zip" nonotice/x
+          Set-Content nonotice/x/LICENSE 'from a failed upgrade'
+          Compress-Archive nonotice/x/image-convert.exe, nonotice/x/LICENSE "nonotice/$zip"
+          foreach ($case in 'missing', 'invalid', 'nonotice') {
+            "$((Get-FileHash "$case/$zip").Hash)  $zip" | Set-Content "$case/SHA256SUMS"
+            $env:IMAGE_CONVERT_BASE = "http://127.0.0.1:8765/$case"
+            powershell -NoProfile -File dist/install.ps1
+            if (!$LASTEXITCODE -or (Get-ChildItem $dir).Count -ne 3) { throw "a failed upgrade ($case) lost image-convert.exe" }
+            if (Select-String -Quiet 'failed upgrade' "$dir/LICENSE") { throw "a failed upgrade ($case) replaced LICENSE" }
+            & "$dir\image-convert.exe" --version
+            if ($LASTEXITCODE) { throw "image-convert.exe doesn't run after the $case upgrade" }
+          }
+  release:
+    if: github.ref_type == 'tag'
+    needs: smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: actions/attest@v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --title "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
