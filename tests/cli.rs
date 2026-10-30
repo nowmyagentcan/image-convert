@@ -734,3 +734,90 @@ fn a_path_that_is_not_utf8_prints_lossily() {
             .exists()
     );
 }
+
+#[test]
+fn a_closed_stdout_or_stderr_ends_the_run_quietly_with_0() {
+    let dir = folder("pipes");
+    fs::write(dir.join("a.png"), small_png()).unwrap();
+    let rgb = gradient(1500, 1000, 3);
+    let big = png(
+        1500,
+        1000,
+        png::ColorType::Rgb,
+        png::BitDepth::Eight,
+        &rgb,
+        |_| {},
+    );
+    fs::write(dir.join("big.png"), big).unwrap();
+    let cases: [(&[&str], bool); 10] = [
+        (&["a.png", "a.png"], true),
+        (&["a.png", "--json"], true),
+        (&["a.png", "--debug"], true),
+        (&["--help"], true),
+        (&["formats"], true),
+        (&["big.png", "-o", "-"], true),
+        (&["a.png", "--debug"], false),
+        (&["missing.png", "a.png"], false),
+        (&["a.png", "-o", "-"], false),
+        (&["a.png", "--quality", "0"], false),
+    ];
+    for (args, close_stdout) in cases {
+        // The read end closes before the binary starts, so its first write fails.
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_image-convert"));
+        command.args(args).current_dir(&dir).stdin(Stdio::null());
+        if close_stdout {
+            command.stdout(writer).stderr(Stdio::piped());
+        } else {
+            command.stderr(writer).stdout(Stdio::piped());
+        }
+        let out = command.output().unwrap();
+        let other = if close_stdout { out.stderr } else { out.stdout };
+        let other = String::from_utf8_lossy(&other);
+        let code = out.status.code();
+        // A usage error still exits 2; only the hung-up stream's output is lost.
+        let expected = if args.contains(&"--quality") { 2 } else { 0 };
+        assert_eq!(code, Some(expected), "{args:?}: {other}");
+        assert!(
+            !other.contains("Can't write") && !other.contains("panicked"),
+            "{args:?}: {other}"
+        );
+    }
+}
+
+#[test]
+fn control_and_bidi_characters_in_names_never_reach_the_terminal() {
+    let dir = folder("escape");
+    let name = if cfg!(windows) {
+        "\u{202e}gnp.exe.png"
+    } else {
+        "\x1b[31mred\u{202e}.png"
+    };
+    fs::write(dir.join(name), small_png()).unwrap();
+    let text = run(&dir, &[name, "--to", "webp"], None);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(
+        !text.stdout.contains(['\x1b', '\u{202e}']),
+        "{}",
+        text.stdout
+    );
+    let shown = if cfg!(windows) {
+        "<U+202E>gnp.exe.png → <U+202E>gnp.exe.webp"
+    } else {
+        "<U+001B>[31mred<U+202E>.png → <U+001B>[31mred<U+202E>.webp"
+    };
+    assert!(text.stdout.contains(shown), "{}", text.stdout);
+    let missing = run(&dir, &[&format!("gone{name}")], None);
+    assert!(
+        !missing.stderr.contains(['\x1b', '\u{202e}']),
+        "{}",
+        missing.stderr
+    );
+    let json = run(&dir, &[name, "--to", "webp", "--json"], None);
+    assert_eq!(
+        json.json()["files"][0]["input"],
+        name,
+        "JSON keeps the name as it is"
+    );
+}

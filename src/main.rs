@@ -14,7 +14,7 @@ use image_convert::error::Error;
 use image_convert::paths::{self, Input, Target};
 use image_convert::{Fit, Format, Options, os};
 use serde::Serialize;
-use text::Out;
+use text::{Look, Out};
 
 const HELP: &str = "\
 {about}
@@ -272,7 +272,7 @@ fn main() -> ExitCode {
         Some("convert") => drop(args.remove(1)),
         Some("formats") => {
             let cli = Formats::parse_from(&args[1..]);
-            let mut out = Out::new(io::stdout().lock());
+            let mut out = Out::new(io::stdout().lock(), Look::stdout());
             return finish(formats(cli.json, &mut out).map(|()| 0));
         }
         _ => {}
@@ -312,11 +312,14 @@ fn main() -> ExitCode {
     }
     // With `-o -` the image goes to stdout, so the text goes to stderr.
     let mut out = if target == Target::Stdout {
-        Out::new(Box::new(io::stderr()) as Box<dyn Write>)
+        Out::new(Box::new(io::stderr()) as Box<dyn Write>, Look::stderr())
     } else {
-        Out::new(Box::new(io::stdout().lock()) as Box<dyn Write>)
+        Out::new(
+            Box::new(io::stdout().lock()) as Box<dyn Write>,
+            Look::stdout(),
+        )
     };
-    let mut err = Out::new(io::stderr());
+    let mut err = Out::new(io::stderr(), Look::stderr());
     let run = convert(&cli, &options, &target, &inputs, &mut out, &mut err);
     finish(run)
 }
@@ -342,8 +345,16 @@ fn convert(
     err: &mut Out<impl Write>,
 ) -> io::Result<u8> {
     let mut files = vec![];
-    for input in inputs {
-        let file = convert_one(input, options, target, cli.overwrite)?;
+    for (n, input) in (1..).zip(inputs) {
+        let name = input.path.file_name().unwrap_or(input.path.as_os_str());
+        let name = name.to_string_lossy();
+        let label = match inputs.len() {
+            1 => format!("Converting {name}"),
+            all => format!("Converting {n} of {all} {} {name}", err.look.pick("·", "-")),
+        };
+        let file = text::spin(err, &label, || {
+            convert_one(input, options, target, cli.overwrite)
+        })?;
         if cli.debug {
             text::debug(err, &file)?;
         }
@@ -443,7 +454,11 @@ fn fail(e: &Error, json: bool) -> ExitCode {
     let _ = if json {
         writeln!(io::stdout(), "{}", e.to_json())
     } else {
-        text::error(&mut Out::new(io::stderr()), &e.message, e.hint)
+        text::error(
+            &mut Out::new(io::stderr(), Look::stderr()),
+            &e.message,
+            e.hint,
+        )
     };
     ExitCode::from(e.exit_code())
 }
