@@ -1,14 +1,16 @@
 //! The image-convert engine: input detection, decoders that share one decoded-image type, and
-//! the pixel pipeline to sRGB.
+//! the pixel pipeline from there to an encoded PNG, JPEG or WebP.
 
 pub mod color;
 pub mod detect;
+pub mod encode;
 pub mod error;
 pub mod jpeg;
 pub mod raster;
 pub mod resize;
 pub mod webp;
 
+use detect::Kind;
 use error::{Error, Warning};
 
 /// How the samples of one pixel are laid out.
@@ -82,9 +84,23 @@ pub enum Fit {
     VisionHd,
 }
 
+/// An output format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Png,
+    Jpeg,
+    Webp,
+}
+
 /// How to convert; limits left at `None` take the preset's value, or none.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Options {
+    /// `None` is `--to auto`.
+    pub to: Option<Format>,
+    /// `None` is 85, which byte fitting may lower.
+    pub quality: Option<u8>,
+    /// Fills transparency in JPEG output.
+    pub background: [u8; 3],
     pub fit: Fit,
     pub max_side: Option<u32>,
     pub max_megapixels: Option<f64>,
@@ -92,6 +108,22 @@ pub struct Options {
     /// The box to fit inside: raster shrinks into it, vector is drawn to fill it.
     pub width: Option<u32>,
     pub height: Option<u32>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            to: None,
+            quality: None,
+            background: [255; 3],
+            fit: Fit::None,
+            max_side: None,
+            max_megapixels: None,
+            max_bytes: None,
+            width: None,
+            height: None,
+        }
+    }
 }
 
 impl Options {
@@ -108,6 +140,69 @@ impl Options {
             self.max_bytes.or(bytes),
         )
     }
+}
+
+/// An encoded image and the facts results report about it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Output {
+    pub bytes: Vec<u8>,
+    pub format: Format,
+    /// The size written, upright.
+    pub width: u32,
+    pub height: u32,
+    /// JPEG and WebP only.
+    pub quality: Option<u8>,
+    /// Whether the size differs from the upright source's.
+    pub resized: bool,
+    pub color: color::Color,
+    /// The decoder's warnings, then the pipeline's.
+    pub warnings: Vec<Warning>,
+}
+
+/// Takes a decoded image through colour, size, orientation and alpha to its output format
+/// (spec §2.4).
+pub fn render(mut px: Pixels, kind: Kind, options: &Options) -> Result<Output, Error> {
+    let (image, color) = color::to_srgb(&mut px);
+    let image = encode::drop_opaque_alpha(image);
+    let format = options
+        .to
+        .unwrap_or_else(|| encode::auto(kind, image.layout.has_alpha()));
+    let mut sizes = options.clone();
+    if format == Format::Webp {
+        sizes.max_side = Some(
+            sizes
+                .limits()
+                .0
+                .map_or(webp::MAX_SIDE, |s| s.min(webp::MAX_SIDE)),
+        );
+    }
+    let mut image = resize::size_and_orient(image, px.orientation, &sizes);
+    if format == Format::Jpeg && image.layout.has_alpha() {
+        image = encode::flatten(image, options.background);
+        let background = match options.background {
+            [255, 255, 255] => "white".to_string(),
+            [0, 0, 0] => "black".to_string(),
+            [r, g, b] => format!("#{r:02x}{g:02x}{b:02x}"),
+        };
+        px.warnings
+            .push(Warning::transparency_flattened(&background));
+    }
+    let quality = options.quality.unwrap_or(85);
+    let upright = if px.orientation >= 5 {
+        (px.height, px.width)
+    } else {
+        (px.width, px.height)
+    };
+    Ok(Output {
+        bytes: encode::encode(&image, format, quality),
+        format,
+        width: image.width,
+        height: image.height,
+        quality: (format != Format::Png).then_some(quality),
+        resized: (image.width, image.height) != upright,
+        color,
+        warnings: px.warnings,
+    })
 }
 
 /// Refuses a header size of 0, or over 65,535 px per side or 200 megapixels, before decoding.

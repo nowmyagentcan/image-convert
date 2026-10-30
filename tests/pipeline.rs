@@ -8,7 +8,7 @@ use common::*;
 use image_convert::color::to_srgb;
 use image_convert::detect::{Kind, detect};
 use image_convert::resize::size_and_orient;
-use image_convert::{Image, Layout, Options, Pixels, jpeg, raster};
+use image_convert::{Format, Image, Layout, Options, Output, Pixels, jpeg, raster, render};
 use jpeg_encoder::ColorType as Jpeg;
 use moxcms::ColorProfile;
 
@@ -313,4 +313,267 @@ fn sizes_are_for_the_upright_image_and_resizing_comes_first() {
         assert_eq!((image.width, image.height), (15, 20));
         assert!(mean_diff(&image.data, &direct.data) <= 1.0);
     }
+}
+
+fn convert(data: &[u8], options: &Options) -> Output {
+    let kind = detect(data, Path::new("input")).unwrap();
+    render(decode(data), kind, options).unwrap()
+}
+
+fn to(format: Format) -> Options {
+    Options {
+        to: Some(format),
+        ..Options::default()
+    }
+}
+
+/// The marker of every JPEG segment before the scan, and the SOF's sampling factors.
+fn jpeg_markers(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let (mut markers, mut sampling, mut at) = (Vec::new(), Vec::new(), 2);
+    while data[at + 1] != 0xda {
+        let marker = data[at + 1];
+        if marker == 0xc0 {
+            let components = usize::from(data[at + 9]);
+            sampling = (0..components).map(|i| data[at + 11 + 3 * i]).collect();
+        }
+        markers.push(marker);
+        at += 2 + usize::from(u16::from_be_bytes([data[at + 2], data[at + 3]]));
+    }
+    (markers, sampling)
+}
+
+/// The chunk types of a PNG, or the chunk ids of a WebP.
+fn chunks(data: &[u8]) -> Vec<String> {
+    let png = data.starts_with(b"\x89PNG");
+    let (mut at, mut out) = (if png { 8 } else { 12 }, Vec::new());
+    while at + 8 <= data.len() {
+        let (len, id) = if png {
+            (
+                u32::from_be_bytes(data[at..at + 4].try_into().unwrap()),
+                &data[at + 4..at + 8],
+            )
+        } else {
+            (
+                u32::from_le_bytes(data[at + 4..at + 8].try_into().unwrap()),
+                &data[at..at + 4],
+            )
+        };
+        out.push(String::from_utf8_lossy(id).into_owned());
+        at += 8 + len as usize + if png { 4 } else { len as usize & 1 };
+    }
+    out
+}
+
+#[test]
+fn outputs_carry_no_metadata() {
+    let rgb = gradient(32, 24, 3);
+    let rgba = gradient(32, 24, 4);
+    let icc = ColorProfile::new_srgb().encode().unwrap();
+    let sources = [
+        jpeg(32, 24, Jpeg::Rgb, &rgb, |e| {
+            e.add_icc_profile(&icc).unwrap();
+            e.add_exif_metadata(&exif_orientation(1)).unwrap();
+            e.add_app_segment(13, b"Photoshop 3.0\0".to_vec()).unwrap();
+        }),
+        png(
+            32,
+            24,
+            png::ColorType::Rgba,
+            png::BitDepth::Eight,
+            &rgba,
+            |info| {
+                info.icc_profile = Some(icc.clone().into());
+                info.exif_metadata = Some(exif_orientation(1).into());
+                info.uncompressed_latin1_text
+                    .push(png::text_metadata::TEXtChunk::new("Comment", "hello"));
+            },
+        ),
+    ];
+    for source in &sources {
+        let out = convert(source, &to(Format::Png));
+        assert_eq!(chunks(&out.bytes), ["IHDR", "IDAT", "IEND"]);
+        let out = convert(source, &to(Format::Jpeg));
+        let markers = jpeg_markers(&out.bytes).0;
+        assert_eq!(markers[0], 0xe0, "JFIF APP0 first");
+        assert!(
+            markers[1..]
+                .iter()
+                .all(|m| !(0xe0..=0xef).contains(m) && *m != 0xfe),
+            "{markers:x?}"
+        );
+        let out = convert(source, &to(Format::Webp));
+        let ids = chunks(&out.bytes);
+        assert!(
+            ids == ["VP8 "] || ids == ["VP8X", "ALPH", "VP8 "],
+            "{ids:?}"
+        );
+    }
+}
+
+#[test]
+fn auto_picks_png_for_drawings_and_transparency_and_jpeg_for_photos() {
+    let photo = jpeg(16, 16, Jpeg::Rgb, &gradient(16, 16, 3), |_| {});
+    let screenshot = png(
+        16,
+        16,
+        png::ColorType::Rgb,
+        png::BitDepth::Eight,
+        &gradient(16, 16, 3),
+        |_| {},
+    );
+    let mut rgba = [90, 120, 150, 255].repeat(256);
+    let opaque = webp_lossless(16, 16, &rgba);
+    rgba[3] = 0;
+    let transparent = webp_lossless(16, 16, &rgba);
+    for (file, format) in [
+        (&photo, Format::Jpeg),
+        (&screenshot, Format::Png),
+        (&opaque, Format::Jpeg),
+        (&transparent, Format::Png),
+    ] {
+        let out = convert(file, &Options::default());
+        assert_eq!(out.format, format);
+        assert_eq!(out.quality, (format == Format::Jpeg).then_some(85));
+    }
+}
+
+#[test]
+fn grey_stays_grey_and_jpeg_chroma_follows_the_quality() {
+    let grey = png(
+        8,
+        8,
+        png::ColorType::Grayscale,
+        png::BitDepth::Eight,
+        &[90; 64],
+        |_| {},
+    );
+    let out = convert(&grey, &Options::default());
+    assert_eq!(out.bytes[25], 0, "PNG colour type");
+    let out = convert(&grey, &to(Format::Jpeg));
+    assert_eq!(jpeg_markers(&out.bytes).1, [0x11]);
+
+    let rgb = png(
+        16,
+        16,
+        png::ColorType::Rgb,
+        png::BitDepth::Eight,
+        &gradient(16, 16, 3),
+        |_| {},
+    );
+    for (quality, luma) in [(89, 0x22), (90, 0x11)] {
+        let options = Options {
+            quality: Some(quality),
+            ..to(Format::Jpeg)
+        };
+        let out = convert(&rgb, &options);
+        assert_eq!(jpeg_markers(&out.bytes).1, [luma, 0x11, 0x11]);
+        assert_eq!(out.quality, Some(quality));
+    }
+}
+
+#[test]
+fn jpeg_flattens_transparency_over_the_background() {
+    // The top 8×8 block is fully transparent; quality 95 keeps chroma at full resolution.
+    let mut rgba = [200, 40, 40, 255].repeat(256);
+    for row in 0..8 {
+        rgba[64 * row..64 * row + 32].fill(0);
+    }
+    let file = png(
+        16,
+        16,
+        png::ColorType::Rgba,
+        png::BitDepth::Eight,
+        &rgba,
+        |_| {},
+    );
+    for (background, name, fill) in [
+        ([255; 3], "white", [255; 3]),
+        ([0, 0, 255], "#0000ff", [0, 0, 255]),
+    ] {
+        let options = Options {
+            background,
+            quality: Some(95),
+            ..to(Format::Jpeg)
+        };
+        let out = convert(&file, &options);
+        assert_eq!(out.warnings[0].code, "transparency_flattened");
+        assert_eq!(
+            out.warnings[0].message,
+            format!("JPEG has no transparency, so transparent areas were filled with {name}.")
+        );
+        let back = srgb(&out.bytes);
+        assert_eq!(back.layout, Layout::Rgb);
+        assert!(
+            back.data[..3]
+                .iter()
+                .zip(fill)
+                .all(|(a, b)| a.abs_diff(b) <= 3),
+            "{:?}",
+            &back.data[..3]
+        );
+    }
+    let opaque = png(
+        8,
+        8,
+        png::ColorType::Rgba,
+        png::BitDepth::Eight,
+        &[9, 9, 9, 255].repeat(64),
+        |_| {},
+    );
+    assert!(convert(&opaque, &to(Format::Jpeg)).warnings.is_empty());
+}
+
+#[test]
+fn webp_keeps_alpha_for_an_independent_decoder() {
+    let mut rgba = gradient(20, 10, 4);
+    for px in rgba.as_chunks_mut::<4>().0.iter_mut().take(100) {
+        px[3] = 0;
+    }
+    let file = png(
+        20,
+        10,
+        png::ColorType::Rgba,
+        png::BitDepth::Eight,
+        &rgba,
+        |_| {},
+    );
+    let out = convert(&file, &to(Format::Webp));
+    let back = image::load_from_memory_with_format(&out.bytes, image::ImageFormat::WebP)
+        .unwrap()
+        .to_rgba8();
+    assert_eq!((back.width(), back.height()), (20, 10));
+    assert_eq!(
+        (back.get_pixel(0, 0)[3], back.get_pixel(19, 9)[3]),
+        (0, 255)
+    );
+
+    // WebP holds at most 16,383 px a side.
+    let wide = png(
+        20000,
+        2,
+        png::ColorType::Rgb,
+        png::BitDepth::Eight,
+        &[128; 120_000],
+        |_| {},
+    );
+    let out = convert(&wide, &to(Format::Webp));
+    assert_eq!((out.width, out.height, out.resized), (16383, 1, true));
+}
+
+#[test]
+fn render_sizes_the_upright_image_and_reports_it() {
+    let file = jpeg(400, 300, Jpeg::Rgb, &gradient(400, 300, 3), |e| {
+        e.add_exif_metadata(&exif_orientation(6)).unwrap();
+    });
+    let options = Options {
+        max_side: Some(100),
+        ..Options::default()
+    };
+    let out = convert(&file, &options);
+    assert_eq!((out.width, out.height, out.resized), (75, 100, true));
+    assert_eq!(out.color.kind, "srgb");
+    let back = decode(&out.bytes);
+    assert_eq!((back.width, back.height, back.orientation), (75, 100, 1));
+    let out = convert(&file, &Options::default());
+    assert_eq!((out.width, out.height, out.resized), (300, 400, false));
 }
