@@ -167,16 +167,7 @@ pub fn render(mut px: Pixels, kind: Kind, options: &Options) -> Result<Output, E
     let format = options
         .to
         .unwrap_or_else(|| encode::auto(kind, image.layout.has_alpha()));
-    let mut sizes = options.clone();
-    if format == Format::Webp {
-        sizes.max_side = Some(
-            sizes
-                .limits()
-                .0
-                .map_or(webp::MAX_SIDE, |s| s.min(webp::MAX_SIDE)),
-        );
-    }
-    let mut image = resize::size_and_orient(image, px.orientation, &sizes);
+    let mut image = resize::size_and_orient(image, px.orientation, options);
     if format == Format::Jpeg && image.layout.has_alpha() {
         image = encode::flatten(image, options.background);
         let background = match options.background {
@@ -187,19 +178,19 @@ pub fn render(mut px: Pixels, kind: Kind, options: &Options) -> Result<Output, E
         px.warnings
             .push(Warning::transparency_flattened(&background));
     }
-    let quality = options.quality.unwrap_or(85);
+    let out = encode::fit(&image, format, options, &mut px.warnings)?;
     let upright = if px.orientation >= 5 {
         (px.height, px.width)
     } else {
         (px.width, px.height)
     };
     Ok(Output {
-        bytes: encode::encode(&image, format, quality),
-        format,
-        width: image.width,
-        height: image.height,
-        quality: (format != Format::Png).then_some(quality),
-        resized: (image.width, image.height) != upright,
+        resized: (out.width, out.height) != upright,
+        bytes: out.bytes,
+        format: out.format,
+        width: out.width,
+        height: out.height,
+        quality: (out.format != Format::Png).then_some(out.quality),
         color,
         warnings: px.warnings,
     })

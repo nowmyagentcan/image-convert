@@ -577,3 +577,141 @@ fn render_sizes_the_upright_image_and_reports_it() {
     let out = convert(&file, &Options::default());
     assert_eq!((out.width, out.height, out.resized), (300, 400, false));
 }
+
+/// Bytes no codec can shrink much, from a fixed seed.
+fn noise(len: usize) -> Vec<u8> {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+fn codes(out: &Output) -> Vec<&str> {
+    out.warnings.iter().map(|w| w.code).collect()
+}
+
+#[test]
+fn byte_limits_change_format_then_quality_then_size() {
+    let screenshot = png(
+        1000,
+        700,
+        png::ColorType::Rgb,
+        png::BitDepth::Eight,
+        &noise(2_100_000),
+        |_| {},
+    );
+    assert!(screenshot.len() > 2_000_000);
+    let limited = |max| {
+        let options = Options {
+            max_bytes: Some(max),
+            ..Options::default()
+        };
+        convert(&screenshot, &options)
+    };
+    let out = limited(300_000);
+    assert!(out.bytes.len() <= 300_000, "{}", out.bytes.len());
+    assert_eq!(codes(&out), ["format_changed", "quality_reduced"]);
+    assert_eq!(
+        out.warnings[0].message,
+        "Saved as JPEG instead of PNG to fit 300000 bytes."
+    );
+    let out = limited(120_000);
+    assert!(out.bytes.len() <= 120_000, "{}", out.bytes.len());
+    assert_eq!(
+        codes(&out),
+        ["format_changed", "quality_reduced", "size_reduced"]
+    );
+    assert_eq!(
+        out.warnings[1].message,
+        "Quality lowered to 50 to fit 120000 bytes."
+    );
+    assert_eq!(
+        out.warnings[2].message,
+        format!(
+            "Shrunk to {}×{} to fit 120000 bytes.",
+            out.width, out.height
+        )
+    );
+    assert_eq!(
+        (out.format, out.quality, out.resized),
+        (Format::Jpeg, Some(50), true)
+    );
+    assert_eq!(srgb(&out.bytes).width, out.width);
+
+    // Transparency goes to WebP; a given quality is kept; a preset brings its own limit.
+    let mut rgba = noise(400 * 300 * 4);
+    rgba.iter_mut().skip(3).step_by(4).for_each(|a| *a |= 1);
+    let file = png(
+        400,
+        300,
+        png::ColorType::Rgba,
+        png::BitDepth::Eight,
+        &rgba,
+        |_| {},
+    );
+    let options = Options {
+        max_bytes: Some(150_000),
+        quality: Some(80),
+        ..Options::default()
+    };
+    let out = convert(&file, &options);
+    assert_eq!(out.format, Format::Webp);
+    assert_eq!(codes(&out), ["format_changed", "size_reduced"]);
+    assert_eq!(out.quality, Some(80));
+    let vision = Options {
+        fit: image_convert::Fit::Vision,
+        ..Options::default()
+    };
+    assert!(convert(&screenshot, &vision).warnings.is_empty());
+}
+
+#[test]
+fn an_impossible_limit_gives_cannot_fit() {
+    let kind = |data: &[u8]| detect(data, Path::new("input")).unwrap();
+    let file = png(
+        256,
+        256,
+        png::ColorType::Rgb,
+        png::BitDepth::Eight,
+        &noise(196_608),
+        |_| {},
+    );
+    let options = Options {
+        max_bytes: Some(1000),
+        ..Options::default()
+    };
+    let err = render(decode(&file), kind(&file), &options).unwrap_err();
+    assert_eq!(err.code, "cannot_fit");
+    assert!(
+        err.message.starts_with(
+            "Can't make this image smaller than 1000 bytes; the smallest try was 81×81, "
+        ),
+        "{}",
+        err.message
+    );
+
+    // A long strip stops at 12 encodes before its longer side reaches 64 px.
+    let strip = png(
+        3000,
+        400,
+        png::ColorType::Rgb,
+        png::BitDepth::Eight,
+        &noise(3_600_000),
+        |_| {},
+    );
+    let options = Options {
+        max_bytes: Some(1000),
+        ..to(Format::Png)
+    };
+    let err = render(decode(&strip), kind(&strip), &options).unwrap_err();
+    assert!(
+        err.message.contains("the smallest try was 126×16, "),
+        "{}",
+        err.message
+    );
+}

@@ -1,4 +1,5 @@
-//! PNG, JPEG and WebP output with no metadata, and the alpha handling around them.
+//! PNG, JPEG and WebP output with no metadata, the alpha handling around them, and fitting under
+//! a byte limit.
 
 use std::borrow::Cow;
 
@@ -7,7 +8,97 @@ use image::{ExtendedColorType, ImageEncoder};
 use jpeg_encoder::{ChromaSubsamplingMethod, ColorType, Encoder};
 
 use crate::detect::Kind;
-use crate::{Format, Image, Layout, webp};
+use crate::error::{Error, Warning};
+use crate::resize::{resize, scaled};
+use crate::{Format, Image, Layout, Options, webp};
+
+/// An encoded attempt: its bytes, format, quality and size.
+#[derive(Debug)]
+pub struct Encoded {
+    pub bytes: Vec<u8>,
+    pub format: Format,
+    pub quality: u8,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Encodes `image` (WebP shrunk to its 16,383 px sides); over a byte limit it then tries, in
+/// order: JPEG or WebP for `--to auto` PNG, quality 75/65/50 when none was given, and sides ×
+/// 0.75 until it fits. At most 12 encodes, else `cannot_fit`.
+pub fn fit(
+    image: &Image,
+    format: Format,
+    options: &Options,
+    warnings: &mut Vec<Warning>,
+) -> Result<Encoded, Error> {
+    let size = |format, scale: f64| {
+        let longer = f64::from(image.width.max(image.height));
+        let cap = match format {
+            Format::Webp => (f64::from(webp::MAX_SIDE) / longer).min(1.0),
+            _ => 1.0,
+        };
+        (
+            scaled(image.width, scale * cap),
+            scaled(image.height, scale * cap),
+        )
+    };
+    let attempt = |format, quality, (width, height)| {
+        let bytes = if (width, height) == (image.width, image.height) {
+            encode(image, format, quality)
+        } else {
+            encode(&resize(image, width, height), format, quality)
+        };
+        Encoded {
+            bytes,
+            format,
+            quality,
+            width,
+            height,
+        }
+    };
+    let quality = options.quality.unwrap_or(85);
+    let mut out = attempt(format, quality, size(format, 1.0));
+    let Some(max) = options.limits().2 else {
+        return Ok(out);
+    };
+    let fits = |out: &Encoded| out.bytes.len() as u64 <= max;
+    let mut encodes = 1;
+    if !fits(&out) && options.to.is_none() && format == Format::Png {
+        let (format, name) = if image.layout.has_alpha() {
+            (Format::Webp, "WebP")
+        } else {
+            (Format::Jpeg, "JPEG")
+        };
+        warnings.push(Warning::format_changed(name, max));
+        out = attempt(format, quality, size(format, 1.0));
+        encodes += 1;
+    }
+    if !fits(&out) && out.format != Format::Png && options.quality.is_none() {
+        for quality in [75, 65, 50] {
+            out = attempt(out.format, quality, size(out.format, 1.0));
+            encodes += 1;
+            if fits(&out) {
+                break;
+            }
+        }
+        warnings.push(Warning::quality_reduced(out.quality, max));
+    }
+    let mut scale = 1.0;
+    while !fits(&out) {
+        scale *= 0.75;
+        let (width, height) = size(out.format, scale);
+        if encodes == 12 || width.max(height) < 64 {
+            let tried = out.bytes.len() as u64;
+            return Err(Error::cannot_fit(max, out.width, out.height, tried));
+        }
+        out = attempt(out.format, out.quality, (width, height));
+        encodes += 1;
+        if fits(&out) {
+            warnings.push(Warning::size_reduced(width, height, max));
+        }
+    }
+    Ok(out)
+}
 
 /// `--to auto`: PNG for sources drawn or stored losslessly and for anything transparent, else
 /// JPEG.
