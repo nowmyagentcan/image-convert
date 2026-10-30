@@ -562,3 +562,62 @@ pub fn plain_emf() -> Vec<u8> {
     let header = record(1, &header);
     [header, records].concat()
 }
+
+/// A CR3 with a JPEG as track 1's first sample, a `PRVW` preview and a `CMT1` block.
+pub fn cr3(sample: &[u8], prvw: &[u8], cmt1: &[u8]) -> Vec<u8> {
+    let metadata = [
+        &[
+            0x85, 0xc0, 0xb6, 0x87, 0x82, 0x0f, 0x11, 0xe0, 0x81, 0x11, 0xf4, 0xce, 0x46, 0x2b,
+            0x6a, 0x48,
+        ][..],
+        &bx(b"CNCV", b"CanonCR3"),
+        &bx(b"CMT1", cmt1),
+    ]
+    .concat();
+    let preview = [
+        &[
+            0xea, 0xf4, 0x2b, 0x5e, 0x1c, 0x98, 0x4b, 0x88, 0xb9, 0xfb, 0xb7, 0xdc, 0x40, 0x6e,
+            0x4d, 0x16,
+        ][..],
+        &[0; 8],
+        &bx(
+            b"PRVW",
+            &[
+                &[0, 0, 0, 0, 0, 1, 0, 8, 0, 8, 0, 1][..],
+                &(prvw.len() as u32).to_be_bytes(),
+                prvw,
+            ]
+            .concat(),
+        ),
+    ]
+    .concat();
+    let ftyp = bx(b"ftyp", b"crx \0\0\0\x01crx isom");
+    let stbl = |offset: u32| {
+        let stsz = full(
+            b"stsz",
+            0,
+            &[
+                0u32.to_be_bytes(),
+                1u32.to_be_bytes(),
+                (sample.len() as u32).to_be_bytes(),
+            ]
+            .concat(),
+        );
+        let stco = full(
+            b"stco",
+            0,
+            &[1u32.to_be_bytes(), offset.to_be_bytes()].concat(),
+        );
+        bx(
+            b"trak",
+            &bx(b"mdia", &bx(b"minf", &bx(b"stbl", &[stsz, stco].concat()))),
+        )
+    };
+    let moov_len = bx(b"moov", &[bx(b"uuid", &metadata), stbl(0)].concat()).len();
+    let offset = ftyp.len() + moov_len + bx(b"uuid", &preview).len() + 8;
+    let moov = bx(
+        b"moov",
+        &[bx(b"uuid", &metadata), stbl(offset as u32)].concat(),
+    );
+    [ftyp, moov, bx(b"uuid", &preview), bx(b"mdat", sample)].concat()
+}

@@ -41,6 +41,9 @@ jobs:
         run: |
           sh tests/fixtures/fetch-raw.sh
           cargo test --locked --test decode real_raw_samples -- --ignored
+      - if: runner.os == 'Linux'
+        name: Convert 1,000 damaged files
+        run: cargo test --locked --test corpus -- --ignored --nocapture
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo fmt --check
   # The Linux HEIF states, each with its exact message: no libheif, libheif 1.12 (too old), no
