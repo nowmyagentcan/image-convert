@@ -8,13 +8,16 @@ use common::*;
 use image_convert::color::to_srgb;
 use image_convert::detect::{Kind, detect};
 use image_convert::resize::size_and_orient;
-use image_convert::{Format, Image, Layout, Options, Output, Pixels, jpeg, raster, render};
+use image_convert::{
+    Format, Image, Layout, Options, Output, Pixels, Samples, jpeg, raster, render, tiff as tif,
+};
 use jpeg_encoder::ColorType as Jpeg;
 use moxcms::ColorProfile;
 
 fn decode(data: &[u8]) -> Pixels {
     match detect(data, Path::new("input")).unwrap() {
         Kind::Jpeg => jpeg::decode(data),
+        Kind::Tiff => tif::decode(data),
         kind => raster::decode(data, kind),
     }
     .unwrap()
@@ -183,6 +186,30 @@ fn adobe_rgb_and_swop_cmyk_match_lcms2() {
     }
 }
 
+#[test]
+fn adobe_rgb_tiff_matches_lcms2() {
+    use tiff::encoder::{Compression, colortype::RGB8};
+    let mut png = decode(&fixture("color-adobergb.png"));
+    let Samples::U8(rgb) = &png.samples else {
+        unreachable!()
+    };
+    let icc = png.icc.take();
+    let file = tiff::<RGB8>(
+        48,
+        32,
+        rgb,
+        Compression::Lzw,
+        tiff::tags::Predictor::Horizontal,
+        &[],
+        icc.as_deref(),
+        1,
+    );
+    let (image, color) = to_srgb(&mut decode(&file));
+    assert_eq!(color.kind, "converted");
+    let reference = srgb(&fixture("color-adobergb-srgb.png"));
+    let worst = worst_delta_e(&image.data, &reference.data);
+    assert!(worst <= 2.0, "ΔE2000 {worst}");
+}
 #[test]
 fn a_broken_profile_is_ignored_with_a_warning() {
     let file = png(

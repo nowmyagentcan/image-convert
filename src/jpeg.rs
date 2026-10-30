@@ -146,20 +146,20 @@ fn frame(data: &[u8]) -> Result<Frame, Error> {
 /// YCCK as zune-jpeg gives it (Y, Cb, Cr, inverted K) to CMYK in Adobe's inverted form.
 fn ycck_to_inverted_cmyk(samples: &mut [u8]) {
     for px in samples.as_chunks_mut::<4>().0 {
-        let (y, cb, cr) = (
-            f32::from(px[0]),
-            f32::from(px[1]) - 128.0,
-            f32::from(px[2]) - 128.0,
-        );
-        let rgb = [
-            y + 1.402 * cr,
-            y - 0.344_136 * cb - 0.714_136 * cr,
-            y + 1.772 * cb,
-        ];
-        for (v, c) in px.iter_mut().zip(rgb) {
-            *v = 255 - c.round().clamp(0.0, 255.0) as u8;
-        }
+        let [r, g, b] = ycc_to_rgb(px[0], px[1], px[2]);
+        px[..3].copy_from_slice(&[255 - r, 255 - g, 255 - b]);
     }
+}
+
+/// Full-range (JFIF) YCbCr to RGB.
+pub fn ycc_to_rgb(y: u8, cb: u8, cr: u8) -> [u8; 3] {
+    let (y, cb, cr) = (f32::from(y), f32::from(cb) - 128.0, f32::from(cr) - 128.0);
+    [
+        y + 1.402 * cr,
+        y - 0.344_136 * cb - 0.714_136 * cr,
+        y + 1.772 * cb,
+    ]
+    .map(|c| c.round().clamp(0.0, 255.0) as u8)
 }
 
 #[cfg(test)]

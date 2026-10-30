@@ -1,7 +1,13 @@
-//! TIFF structure: the IFD walker that TIFF, RAW and EXIF share, and the checks that refuse every
-//! TIFF variant outside the matrix before a decoder sees the file.
+//! TIFF: the IFD walker that TIFF, RAW and EXIF share, the checks that refuse every TIFF variant
+//! outside the matrix before a decoder sees the file, and strip decoding through the tiff crate.
 
-use crate::error::Error;
+use std::io::Cursor;
+
+use ::tiff::decoder::{Decoder, DecodingResult, Limits};
+
+use crate::error::{Error, Warning};
+use crate::jpeg::ycc_to_rgb;
+use crate::{Layout, Pixels, Samples, check_size};
 
 /// A TIFF header's byte order and the file it lies in.
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +59,15 @@ impl<'a> Tiff<'a> {
         } else {
             u16::from_le_bytes([b[0], b[1]])
         })
+    }
+
+    /// `v` as two bytes in this file's byte order.
+    pub fn u16_bytes(&self, v: u16) -> [u8; 2] {
+        if self.big {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
     }
 
     pub fn u32(&self, at: usize) -> Option<u32> {
@@ -298,6 +313,98 @@ pub fn check(data: &[u8]) -> Result<Page, Error> {
         extra,
         alpha,
     })
+}
+
+/// Decodes the first page of a TIFF that passes [`check`]: grey, grey + alpha, RGB, RGBA or CMYK,
+/// with its orientation, ICC profile and page count.
+pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
+    let page = check(data)?;
+    check_size(page.width.into(), page.height.into(), "TIFF")?;
+    let (tiff, first) = Tiff::new(data).expect("check read the header");
+    let chain = tiff.ifds(first, false);
+    let pages = chain.iter().filter(|i| i.value(254).unwrap_or(0) & 1 == 0);
+    let pages = pages.count().max(1) as u32;
+    let ifd0 = &chain[0];
+
+    // The tiff crate misreads the strips when ExtraSamples is 0 (unspecified), so a copy labels
+    // the sample as alpha; it is dropped below either way.
+    let copy;
+    let data = match ifd0.get(338).filter(|_| page.extra && !page.alpha) {
+        Some(e) => {
+            copy = [&data[..e.at], &tiff.u16_bytes(2), &data[e.at + 2..]].concat();
+            &copy[..]
+        }
+        None => data,
+    };
+    let failed = |e: ::tiff::TiffError| Error::corrupt("TIFF", e);
+    let mut limits = Limits::default();
+    limits.decoding_buffer_size = 2 << 30;
+    let mut decoder = Decoder::new(Cursor::new(data))
+        .map_err(failed)?
+        .with_limits(limits);
+    let (w, h) = (page.width as usize, page.height as usize);
+    let channels = page.colours + usize::from(page.extra);
+    let samples = match decoder.read_image().map_err(failed)? {
+        DecodingResult::U8(s) if page.bits == 1 && s.len() >= w.div_ceil(8) * h => {
+            let row = w.div_ceil(8);
+            let bit = |x: usize, y: usize| s[y * row + x / 8] >> (7 - x % 8) & 1;
+            Samples::U8(
+                (0..h)
+                    .flat_map(|y| (0..w).map(move |x| bit(x, y) * 255))
+                    .collect(),
+            )
+        }
+        DecodingResult::U8(s) if s.len() == w * h * channels => Samples::U8(s),
+        DecodingResult::U16(s) if s.len() == w * h * channels => Samples::U16(s),
+        _ => {
+            let reason = "its strips hold the wrong amount of data";
+            return Err(Error::corrupt("TIFF", reason));
+        }
+    };
+    let samples = match samples {
+        Samples::U8(s) if page.extra && !page.alpha => Samples::U8(drop_extra(&s, channels)),
+        Samples::U16(s) if page.extra && !page.alpha => Samples::U16(drop_extra(&s, channels)),
+        Samples::U8(s) if page.photometric == 6 => Samples::U8(
+            s.as_chunks::<3>()
+                .0
+                .iter()
+                .flat_map(|&[y, cb, cr]| ycc_to_rgb(y, cb, cr))
+                .collect(),
+        ),
+        samples => samples,
+    };
+    let layout = match (page.colours, page.alpha) {
+        (1, false) => Layout::Grey,
+        (1, true) => Layout::GreyAlpha,
+        (3, false) => Layout::Rgb,
+        (3, true) => Layout::Rgba,
+        _ => Layout::Cmyk,
+    };
+    let orientation = ifd0.value(274).filter(|o| (1..=8).contains(o));
+    Ok(Pixels {
+        width: page.width,
+        height: page.height,
+        layout,
+        samples,
+        bit_depth: page.bits as u8,
+        icc: ifd0.bytes(34675).map(<[u8]>::to_vec),
+        exif: None,
+        orientation: orientation.unwrap_or(1) as u8,
+        frames: pages,
+        warnings: (pages > 1)
+            .then(|| Warning::first_page_only(pages))
+            .into_iter()
+            .collect(),
+    })
+}
+
+/// Each pixel's samples without the last one.
+fn drop_extra<T: Copy>(samples: &[T], channels: usize) -> Vec<T> {
+    samples
+        .chunks_exact(channels)
+        .flat_map(|p| &p[..channels - 1])
+        .copied()
+        .collect()
 }
 
 #[cfg(test)]

@@ -263,3 +263,40 @@ pub fn fixture(name: &str) -> Vec<u8> {
     ))
     .unwrap()
 }
+
+/// A TIFF of 4-row strips from the tiff crate's encoder (little-endian): `pages` copies of the
+/// image, each with `tags` (SHORT values) and the ICC profile `icc` added.
+#[allow(clippy::too_many_arguments)]
+pub fn tiff<C: tiff::encoder::colortype::ColorType>(
+    width: u32,
+    height: u32,
+    data: &[C::Inner],
+    compression: tiff::encoder::Compression,
+    predictor: tiff::tags::Predictor,
+    tags: &[(u16, u16)],
+    icc: Option<&[u8]>,
+    pages: usize,
+) -> Vec<u8>
+where
+    [C::Inner]: tiff::encoder::TiffValue,
+{
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut encoder = tiff::encoder::TiffEncoder::new(&mut out)
+        .unwrap()
+        .with_compression(compression)
+        .with_predictor(predictor);
+    for _ in 0..pages {
+        let mut image = encoder.new_image::<C>(width, height).unwrap();
+        image.rows_per_strip(4).unwrap();
+        for &(tag, value) in tags {
+            let tag = tiff::tags::Tag::from_u16_exhaustive(tag);
+            image.encoder().write_tag(tag, value).unwrap();
+        }
+        if let Some(icc) = icc {
+            let tag = tiff::tags::Tag::from_u16_exhaustive(34675);
+            image.encoder().write_tag(tag, icc).unwrap();
+        }
+        image.write_data(data).unwrap();
+    }
+    out.into_inner()
+}

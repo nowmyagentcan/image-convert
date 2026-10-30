@@ -10,7 +10,7 @@ use std::path::Path;
 use common::*;
 use image_convert::detect::{Kind, detect};
 use image_convert::error::Error;
-use image_convert::{Layout, Pixels, Samples, jpeg, raster};
+use image_convert::{Layout, Pixels, Samples, jpeg, raster, tiff as tif};
 use jpeg_encoder::{ColorType as Jpeg, SamplingFactor};
 use png::{BitDepth, ColorType as Png};
 
@@ -44,6 +44,7 @@ static COUNTING: Counting = Counting;
 fn decode(data: &[u8]) -> Result<Pixels, Error> {
     match detect(data, Path::new("input"))? {
         Kind::Jpeg => jpeg::decode(data),
+        Kind::Tiff => tif::decode(data),
         kind => raster::decode(data, kind),
     }
 }
@@ -714,4 +715,100 @@ fn generated_files_are_detected_by_content() {
     for (file, kind) in cases {
         assert_eq!(detect(&file, Path::new("no-extension")), Ok(kind));
     }
+}
+
+#[test]
+fn tiff_every_layout_compression_and_predictor() {
+    use tiff::encoder::{Compression as C, DeflateLevel, colortype as ct};
+    use tiff::tags::Predictor as P;
+    let (w, h) = (9, 10);
+    let grey = gradient(w, h, 1);
+    let grey16: Vec<u16> = grey.iter().map(|&v| u16::from(v) * 251 + 3).collect();
+    let rgb = gradient(w, h, 3);
+    let rgb16: Vec<u16> = rgb.iter().map(|&v| u16::from(v) * 251).collect();
+    let rgba = gradient(w, h, 4);
+    let schemes = [
+        (C::Uncompressed, P::None),
+        (C::Lzw, P::None),
+        (C::Lzw, P::Horizontal),
+        (C::Deflate(DeflateLevel::Balanced), P::Horizontal),
+        (C::Packbits, P::None),
+    ];
+    for (i, (c, p)) in schemes.into_iter().enumerate() {
+        let px = decode(&tiff::<ct::Gray8>(w, h, &grey, c, p, &[], None, 1)).unwrap();
+        assert_eq!(
+            (px.layout, u8s(&px)),
+            (Layout::Grey, &grey[..]),
+            "scheme {i}"
+        );
+        let px = decode(&tiff::<ct::Gray16>(w, h, &grey16, c, p, &[], None, 1)).unwrap();
+        assert_eq!(
+            (px.bit_depth, &px.samples),
+            (16, &Samples::U16(grey16.clone()))
+        );
+        let px = decode(&tiff::<ct::RGB8>(w, h, &rgb, c, p, &[], None, 1)).unwrap();
+        assert_eq!((px.layout, u8s(&px)), (Layout::Rgb, &rgb[..]));
+        let px = decode(&tiff::<ct::RGB16>(w, h, &rgb16, c, p, &[], None, 1)).unwrap();
+        assert_eq!(px.samples, Samples::U16(rgb16.clone()));
+        let alpha = [(338, 2)];
+        let px = decode(&tiff::<ct::RGBA8>(w, h, &rgba, c, p, &alpha, None, 1)).unwrap();
+        assert_eq!((px.layout, u8s(&px)), (Layout::Rgba, &rgba[..]));
+        // ExtraSamples absent or 0: the fourth sample is dropped.
+        let opaque: Vec<u8> = rgba.chunks(4).flat_map(|p| &p[..3]).copied().collect();
+        for tags in [&[][..], &[(338, 0)]] {
+            let px = decode(&tiff::<ct::RGBA8>(w, h, &rgba, c, p, tags, None, 1)).unwrap();
+            assert_eq!((px.layout, u8s(&px)), (Layout::Rgb, &opaque[..]));
+        }
+        let px = decode(&tiff::<ct::CMYK8>(w, h, &rgba, c, p, &[], None, 1)).unwrap();
+        assert_eq!((px.layout, u8s(&px)), (Layout::Cmyk, &rgba[..]));
+    }
+    // Old-style Deflate (32946) is the same stream under another number.
+    let mut old = tiff::<ct::RGB8>(
+        w,
+        h,
+        &rgb,
+        C::Deflate(DeflateLevel::Fast),
+        P::None,
+        &[],
+        None,
+        1,
+    );
+    let at = old.windows(4).position(|x| x == [3, 1, 3, 0]).unwrap();
+    old[at + 8..at + 10].copy_from_slice(&32946u16.to_le_bytes());
+    assert_eq!(u8s(&decode(&old).unwrap()), &rgb[..]);
+}
+
+#[test]
+fn tiff_orientation_profile_and_pages() {
+    use tiff::encoder::{Compression as C, colortype as ct};
+    use tiff::tags::Predictor as P;
+    let icc = profile(300);
+    let grey = [7u8; 4];
+    let file = tiff::<ct::Gray8>(
+        2,
+        2,
+        &grey,
+        C::Uncompressed,
+        P::None,
+        &[(274, 6)],
+        Some(&icc),
+        1,
+    );
+    let px = decode(&file).unwrap();
+    assert_eq!((px.orientation, px.icc, px.frames), (6, Some(icc), 1));
+    assert!(px.warnings.is_empty());
+    let pages = tiff::<ct::Gray8>(2, 2, &grey, C::Uncompressed, P::None, &[], None, 3);
+    let px = decode(&pages).unwrap();
+    assert_eq!(px.frames, 3);
+    assert_eq!(
+        px.warnings[0].message,
+        "This TIFF has 3 pages; only the first was converted."
+    );
+    // Reduced-resolution pages (NewSubfileType bit 0) don't count.
+    let thumbs = tiff::<ct::Gray8>(2, 2, &grey, C::Uncompressed, P::None, &[(254, 1)], None, 2);
+    let mut thumbs = thumbs;
+    let first = thumbs.windows(4).position(|x| x == [254, 0, 3, 0]).unwrap();
+    thumbs[first + 8] = 0;
+    let px = decode(&thumbs).unwrap();
+    assert_eq!((px.frames, px.warnings.len()), (1, 0));
 }
