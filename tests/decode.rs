@@ -69,15 +69,6 @@ fn alpha(px: &Pixels) -> Vec<u8> {
         .collect()
 }
 
-fn mean_diff(a: &[u8], b: &[u8]) -> f64 {
-    assert_eq!(a.len(), b.len());
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| x.abs_diff(*y) as f64)
-        .sum::<f64>()
-        / a.len() as f64
-}
-
 /// Palette indices 0..6 into `COLORS`, as BMP rows of 3 pixels, top row first.
 const INDICES: [[u8; 3]; 2] = [[0, 1, 2], [3, 4, 5]];
 

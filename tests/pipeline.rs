@@ -24,27 +24,19 @@ fn srgb(data: &[u8]) -> Image {
     to_srgb(&mut decode(data)).0
 }
 
-fn mean_diff(a: &[u8], b: &[u8]) -> f64 {
-    assert_eq!(a.len(), b.len());
-    let sum: f64 = a
-        .iter()
-        .zip(b)
-        .map(|(x, y)| f64::from(x.abs_diff(*y)))
-        .sum();
-    sum / a.len() as f64
+/// An sRGB sample in linear light.
+fn linear(v: u8) -> f64 {
+    let c = f64::from(v) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// CIELAB (D65) of an sRGB colour.
 fn lab([r, g, b]: [u8; 3]) -> [f64; 3] {
-    let lin = |v: u8| {
-        let c = f64::from(v) / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    let (r, g, b) = (lin(r), lin(g), lin(b));
+    let (r, g, b) = (linear(r), linear(g), linear(b));
     let x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047;
     let y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b;
     let z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883;
@@ -127,14 +119,6 @@ fn display_p3_jpeg_matches_the_matrix_conversion() {
         [-0.0420569, 1.0420571, 0.0],
         [-0.0196376, -0.0786361, 1.0982735],
     ];
-    let decode_curve = |v: u8| {
-        let c = f64::from(v) / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
     let encode_curve = |c: f64| {
         let c = c.clamp(0.0, 1.0);
         let v = if c <= 0.0031308 {
@@ -156,9 +140,9 @@ fn display_p3_jpeg_matches_the_matrix_conversion() {
         let (x, y) = (i % usize::from(width), i / usize::from(width));
         let colour = colours[y / 8 * 6 + x / 8];
         *px = colour;
-        let linear = colour.map(decode_curve);
+        let light = colour.map(linear);
         for (c, row) in P3_TO_SRGB.iter().enumerate() {
-            expected[3 * i + c] = encode_curve((0..3).map(|k| row[k] * linear[k]).sum());
+            expected[3 * i + c] = encode_curve((0..3).map(|k| row[k] * light[k]).sum());
         }
     }
     let icc = ColorProfile::new_display_p3().encode().unwrap();

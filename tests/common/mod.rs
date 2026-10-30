@@ -244,6 +244,17 @@ pub fn profile(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 7 % 251) as u8).collect()
 }
 
+/// The mean absolute difference of two equal-length sample buffers.
+pub fn mean_diff(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let sum: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| f64::from(x.abs_diff(*y)))
+        .sum();
+    sum / a.len() as f64
+}
+
 /// A fixture written by tests/fixtures/make.sh.
 pub fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(
