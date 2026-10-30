@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "ico", "webp"] }
+zune-jpeg = "0.5.15"
 
 [profile.dev]
 opt-level = 1
@@ -23,3 +24,6 @@ strip = true
 
 [build-dependencies]
 cc = "1.10.0"
+
+[dev-dependencies]
+jpeg-encoder = "0.7.1"

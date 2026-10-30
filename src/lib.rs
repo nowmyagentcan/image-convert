@@ -2,6 +2,7 @@
 
 pub mod detect;
 pub mod error;
+pub mod jpeg;
 pub mod raster;
 pub mod webp;
 
