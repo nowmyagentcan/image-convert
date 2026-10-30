@@ -8,7 +8,7 @@ use windows::Win32::Graphics::GdiPlus::{
     GdipCreateBitmapFromScan0, GdipCreateMetafileFromStream, GdipDeleteGraphics, GdipDisposeImage,
     GdipDrawImageRectI, GdipGetImageGraphicsContext, GdipGetMetafileHeaderFromMetafile,
     GdipGraphicsClear, GdipSetInterpolationMode, GdipSetPageUnit, GdipSetSmoothingMode,
-    GdipSetTextRenderingHint, GdiplusStartup, GdiplusStartupInput, GpBitmap, GpGraphics, GpImage,
+    GdipSetTextRenderingHint, GdiplusStartup, GdiplusStartupInput, GpBitmap, GpGraphics,
     GpMetafile, ImageLockModeRead, InterpolationModeHighQualityBicubic, MetafileHeader,
     MetafileTypeEmfPlusDual, MetafileTypeEmfPlusOnly, Ok as DONE, Rect, SmoothingModeAntiAlias,
     Status, TextRenderingHintAntiAliasGridFit, UnitPixel,
@@ -35,10 +35,6 @@ impl<T> Drop for Object<T> {
             unsafe { (self.1)(self.0) };
         }
     }
-}
-
-unsafe fn dispose(image: *mut GpImage) -> Status {
-    unsafe { GdipDisposeImage(image) }
 }
 
 unsafe fn delete(graphics: *mut GpGraphics) -> Status {
@@ -215,9 +211,9 @@ pub fn render(data: &[u8], kind: Kind, options: &Options) -> Result<(Pixels, (u3
 }
 
 unsafe fn dispose_metafile(metafile: *mut GpMetafile) -> Status {
-    unsafe { dispose(metafile.cast()) }
+    unsafe { GdipDisposeImage(metafile.cast()) }
 }
 
 unsafe fn dispose_bitmap(bitmap: *mut GpBitmap) -> Status {
-    unsafe { dispose(bitmap.cast()) }
+    unsafe { GdipDisposeImage(bitmap.cast()) }
 }
