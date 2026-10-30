@@ -206,15 +206,21 @@ impl Input {
             (Target::Dir(dir), _) => dir.join(rel_dir().unwrap_or_default()),
         };
         let stem = match self.path.file_stem() {
-            _ if self.path.as_os_str() == "-" => "stdin".into(),
-            Some(stem) => stem.to_string_lossy(),
-            None => "image".into(),
+            _ if self.path.as_os_str() == "-" => "stdin".as_ref(),
+            Some(stem) => stem,
+            None => "image".as_ref(),
         };
-        let first = dir.join(format!("{stem}.{ext}"));
+        // Built as an OsString, so a name that isn't UTF-8 is written as it is.
+        let name = |suffix: String| {
+            let mut name = stem.to_os_string();
+            name.push(suffix);
+            dir.join(name)
+        };
+        let first = name(format!(".{ext}"));
         (0..1000)
             .map(|n| match n {
                 0 => first.clone(),
-                n => dir.join(format!("{stem}-{n}.{ext}")),
+                n => name(format!("-{n}.{ext}")),
             })
             .find(|p| !exists(p))
             .map(Some)

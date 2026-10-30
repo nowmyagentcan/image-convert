@@ -100,7 +100,8 @@ impl Error {
             | "format_conflict"
             | "output_needs_one_input"
             | "stdin_needs_output"
-            | "json_with_stdout" => 2,
+            | "json_with_stdout"
+            | "usage" => 2,
             "internal" | "port_in_use" | "io" => 3,
             _ => 1,
         }
@@ -374,6 +375,11 @@ impl Error {
 
     pub fn json_with_stdout() -> Self {
         e("json_with_stdout", "--json can't be used with -o -.", None)
+    }
+
+    /// One of clap's own errors (an unknown flag, a missing value), as a sentence.
+    pub fn usage(message: String) -> Self {
+        e("usage", message, Some("Try: image-convert --help"))
     }
 
     // Runtime errors.
