@@ -12,7 +12,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Ubuntu 24.04, not ubuntu-latest: 26.04 ships other libheif plugins.
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -21,10 +22,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libheif1 libheif-plugin-libde265 libheif-plugin-dav1d
       - run: cargo test --locked
         env:
-          # ImageIO must decode both; elsewhere the tests follow what this machine has.
-          IMAGE_CONVERT_TEST_REQUIRE: ${{ runner.os == 'macOS' && 'heic,avif' || '' }}
+          # ImageIO and libheif with both plugins must decode both. Windows runners have no
+          # Store extensions, so there the tests follow what `formats` reports.
+          IMAGE_CONVERT_TEST_REQUIRE: ${{ runner.os != 'Windows' && 'heic,avif' || '' }}
+      - name: Formats this runner decodes
+        run: cargo test --locked --test decode formats -- --nocapture
       - if: runner.os == 'Linux'
         uses: actions/cache@v6
         with:
@@ -37,6 +43,31 @@ jobs:
           cargo test --locked --test decode real_raw_samples -- --ignored
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo fmt --check
+  # The Linux HEIF states, each with its exact message: no libheif, libheif 1.12 (too old), no
+  # decoder plugins, and both plugins.
+  heif-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: 'ubuntu:24.04', state: none, packages: '' }
+          - { image: 'ubuntu:22.04', state: old, packages: libheif1 }
+          - { image: 'ubuntu:24.04', state: no-plugin, packages: libheif1 }
+          - { image: 'ubuntu:24.04', state: all, packages: libheif1 libheif-plugin-libde265 libheif-plugin-dav1d }
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    steps:
+      - run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gcc libc6-dev git curl ca-certificates ${{ matrix.packages }}
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked heif
+        env:
+          IMAGE_CONVERT_TEST_HEIF: ${{ matrix.state }}
+          IMAGE_CONVERT_TEST_REQUIRE: ${{ matrix.state == 'all' && 'heic,avif' || '' }}
   licenses:
     runs-on: ubuntu-latest
     steps:

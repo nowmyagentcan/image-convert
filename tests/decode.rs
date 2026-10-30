@@ -1684,3 +1684,24 @@ fn formats_lists_the_matrix_in_order_as_this_machine_decodes_it() {
         assert_eq!(row.status(), status);
     }
 }
+
+/// CI's heif-linux job names the libheif packages it installed in `IMAGE_CONVERT_TEST_HEIF`.
+#[test]
+fn heif_state_matches_the_installed_packages() {
+    let Ok(state) = std::env::var("IMAGE_CONVERT_TEST_HEIF") else {
+        return;
+    };
+    for (kind, name, codec) in [(Kind::Heic, "HEIC", "HEVC"), (Kind::Avif, "AVIF", "AV1")] {
+        let expected = match state.as_str() {
+            "none" => Some(format!(
+                "{name} needs the system's libheif library, which isn't installed."
+            )),
+            "old" => Some("The system's libheif 1.12 is too old; 1.13 or newer is needed.".into()),
+            "no-plugin" => Some(format!("The system's libheif has no {codec} decoder.")),
+            "all" => None,
+            other => panic!("unknown IMAGE_CONVERT_TEST_HEIF: {other}"),
+        };
+        let got = image_convert::os::heif_available(kind).err();
+        assert_eq!(got.map(|e| e.message), expected, "{name}");
+    }
+}
