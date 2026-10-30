@@ -1395,3 +1395,94 @@ fn raw_without_a_usable_preview() {
         "corrupt_image"
     );
 }
+
+/// The CC0 samples tests/fixtures/fetch-raw.sh downloads (too large to commit), one per kind.
+#[test]
+#[ignore = "needs tests/fixtures/fetch-raw.sh"]
+fn real_raw_samples() {
+    let dir = std::env::var("IMAGE_CONVERT_RAW_SAMPLES")
+        .unwrap_or_else(|_| format!("{}/target/raw-samples", env!("CARGO_MANIFEST_DIR")));
+    let mut kinds = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let data = std::fs::read(&path).unwrap();
+        let kind = detect(&data, &path).unwrap();
+        let px = raw::decode(&data, kind).unwrap_or_else(|e| panic!("{path:?}: {}", e.message));
+        println!(
+            "{path:?}: {}×{} orientation {}",
+            px.width, px.height, px.orientation
+        );
+        assert!(
+            px.warnings.iter().any(|w| w.code == "raw_preview"),
+            "{path:?}"
+        );
+        let fit = Options {
+            fit: image_convert::Fit::Vision,
+            ..Options::default()
+        };
+        let out = image_convert::render(px, kind, &fit).unwrap();
+        assert!(out.width.max(out.height) <= 1568);
+        kinds.push(kind);
+    }
+    kinds.sort_by_key(|k| k.name());
+    use Kind::*;
+    assert_eq!(kinds, [Arw, Cr2, Cr3, Dng, Nef, Pef, Raf, Rw2]);
+}
+
+/// Samples as 8 bits, as the pipeline reduces them.
+fn eight(px: &Pixels) -> Vec<u8> {
+    match &px.samples {
+        Samples::U8(s) => s.clone(),
+        Samples::U16(s) => s
+            .iter()
+            .map(|&v| ((u32::from(v) + 128) / 257) as u8)
+            .collect(),
+    }
+}
+
+#[test]
+fn tiff_from_libtiff_and_imagemagick_match_their_references() {
+    let cases = [
+        ("tiff-be-lzw.tif", "tiff-src.png", Layout::Rgb, 0.0),
+        (
+            "tiff-rgb-jpeg.tif",
+            "tiff-rgb-jpeg-ref.png",
+            Layout::Rgb,
+            2.0,
+        ),
+        (
+            "tiff-ycbcr-jpeg.tif",
+            "tiff-ycbcr-jpeg-ref.png",
+            Layout::Rgb,
+            2.0,
+        ),
+        ("tiff-g4.tif", "tiff-g4-ref.png", Layout::Grey, 0.0),
+        (
+            "tiff-bilevel.tif",
+            "tiff-bilevel-ref.png",
+            Layout::Grey,
+            0.0,
+        ),
+        ("tiff-white.tif", "tiff-white-ref.png", Layout::Grey, 0.0),
+        (
+            "tiff-greya8.tif",
+            "tiff-greya8-ref.png",
+            Layout::GreyAlpha,
+            0.0,
+        ),
+        (
+            "tiff-greya16.tif",
+            "tiff-greya8-ref.png",
+            Layout::GreyAlpha,
+            0.0,
+        ),
+    ];
+    for (file, reference, layout, max) in cases {
+        let px = decode(&fixture(file)).unwrap();
+        let reference = decode(&fixture(reference)).unwrap();
+        assert_eq!((px.layout, px.width, px.height), (layout, 40, 30), "{file}");
+        assert_eq!(reference.layout, layout, "{file}'s reference");
+        let diff = mean_diff(&eight(&px), &eight(&reference));
+        assert!(diff <= max, "{file}: mean difference {diff}");
+    }
+}

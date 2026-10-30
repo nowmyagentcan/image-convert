@@ -43,6 +43,41 @@ patches('CMYK', inks).save('color-swop.jpg', quality=100, icc_profile=open(swop,
 reference(Image.open('color-swop.jpg'), swop, 'color-swop-srgb.png')
 PY
 
+# TIFF variants from libtiff and ImageMagick, each with ImageMagick's decode as the reference:
+#   apt install libtiff-tools
+convert -seed 1 -size 40x30 plasma: -depth 8 png24:tiff-src.png
+convert tiff-src.png -define tiff:endian=msb -compress LZW -define tiff:predictor=2 tiff-be-lzw.tif
+convert tiff-src.png -compress None tiff-plain.tif
+tiffcp -c jpeg:r:90 tiff-plain.tif tiff-rgb-jpeg.tif
+tiffcp -c jpeg:90 tiff-plain.tif tiff-ycbcr-jpeg.tif
+convert tiff-src.png -colorspace Gray -threshold 50% -type Bilevel -define tiff:photometric=min-is-white -compress Group4 tiff-g4.tif
+convert tiff-src.png -colorspace Gray -threshold 50% -type Bilevel -depth 1 -compress None -define tiff:photometric=min-is-black tiff-bilevel.tif
+convert tiff-src.png -colorspace Gray -depth 8 -compress Zip -define tiff:photometric=min-is-white tiff-white.tif
+# Grey + alpha, which ImageMagick 6 writes as RGBA: 8-bit PackBits from Pillow, and 16-bit
+# big-endian uncompressed written field by field; both come back as tiff-greya8-ref.png.
+python3 - <<'PY'
+import struct
+from PIL import Image
+la = Image.open('tiff-src.png').convert('LA')
+la.putalpha(Image.linear_gradient('L').resize(la.size))
+la.save('tiff-greya8.tif', compression='packbits')
+la.save('tiff-greya8-ref.png')
+w, h = la.size
+px = b''.join(struct.pack('>HH', g * 257, a * 257 + (a < 255)) for g, a in la.getdata())
+tags = [(256, 3, 1, w), (257, 3, 1, h), (258, 3, 1, 16), (259, 3, 1, 1), (262, 3, 1, 1),
+        (273, 4, 1, 0), (277, 3, 1, 2), (278, 3, 1, h), (279, 4, 1, len(px)), (338, 3, 1, 2)]
+start = 8 + 2 + 12 * len(tags) + 4
+ifd = struct.pack('>H', len(tags)) + b''.join(
+    struct.pack('>HHI', t, k, n) + (struct.pack('>HH', v, 0) if k == 3 else
+                                     struct.pack('>I', start if t == 273 else v))
+    for t, k, n, v in tags) + b'\0\0\0\0'
+open('tiff-greya16.tif', 'wb').write(b'MM\0*\0\0\0\x08' + ifd + px)
+PY
+rm tiff-plain.tif
+for f in tiff-rgb-jpeg tiff-ycbcr-jpeg tiff-g4 tiff-bilevel tiff-white; do
+  convert $f.tif -depth 8 png:$f-ref.png
+done
+
 # JPEG XL from cjxl 0.7 (apt install libjxl-tools), lossy with djxl's decode as the reference.
 convert -seed 2 -size 64x48 plasma: -depth 8 png24:jxl-src.png
 cjxl -q 90 jxl-src.png jxl-lossy.jxl
