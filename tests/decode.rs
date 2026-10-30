@@ -12,7 +12,7 @@ use image_convert::color::{Cicp, Colour};
 use image_convert::detect::{Kind, detect};
 use image_convert::error::Error;
 use image_convert::{
-    Layout, Options, Pixels, Samples, bmff, jpeg, jxl, raster, raw, svg, tiff as tif,
+    Layout, Options, Pixels, Samples, bmff, engine, jpeg, jxl, raster, raw, svg, tiff as tif,
 };
 use jpeg_encoder::{ColorType as Jpeg, SamplingFactor};
 use png::{BitDepth, ColorType as Png};
@@ -1463,6 +1463,16 @@ fn heif_irot_is_applied_once_and_exif_orientation_ignored() {
         };
         let diff = mean_diff(&rgb, &expected);
         assert!(diff <= 1.0, "{name}: mean difference {diff}");
+    }
+}
+
+#[test]
+fn heif_results_report_alpha_from_the_file() {
+    for (name, alpha) in [("heif-alpha.avif", true), ("heif-p3.avif", false)] {
+        if os_heif(name).is_some() {
+            let (file, _) = engine::convert(name.into(), &fixture(name), &Options::default());
+            assert_eq!(file.source.unwrap().alpha, alpha, "{name}");
+        }
     }
 }
 

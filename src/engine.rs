@@ -151,6 +151,7 @@ fn run(data: &[u8], options: &Options, file: &mut FileResult) -> Result<Vec<u8>,
     }
     file.input_format = Some(kind.name());
     let builtin = "builtin";
+    let mut alpha = None;
     // The pixels, the decoder, and the size and orientation results report when they aren't
     // the pixels' own: a drawing's size before rendering, a HEIF image's before the OS turned it.
     let (px, decoder, stored): (Pixels, _, Option<(u32, u32, u8)>) = match kind {
@@ -171,6 +172,8 @@ fn run(data: &[u8], options: &Options, file: &mut FileResult) -> Result<Vec<u8>,
                 1 => heif.orientation(),
                 turned => turned,
             };
+            // OS decoders give RGBA either way; the file says whether there is alpha.
+            alpha = Some(heif.alpha);
             let stored = Some((heif.width, heif.height, orientation));
             (px, os::HEIF_DECODER, stored)
         }
@@ -193,7 +196,7 @@ fn run(data: &[u8], options: &Options, file: &mut FileResult) -> Result<Vec<u8>,
         width,
         height,
         bit_depth: px.bit_depth,
-        alpha: px.layout.has_alpha(),
+        alpha: alpha.unwrap_or(px.layout.has_alpha()),
         frames: px.frames,
         orientation,
         color: described.kind,
