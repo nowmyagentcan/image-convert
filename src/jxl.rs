@@ -25,8 +25,6 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
     image.set_cms(Moxcms);
     image.request_color_encoding(encoding);
     let frames = image.num_loaded_keyframes() as u32;
-    let render = image.render_frame(0).map_err(failed)?;
-    let mut stream = render.stream();
     let layout = match image.pixel_format() {
         PixelFormat::Gray => Layout::Grey,
         PixelFormat::Graya => Layout::GreyAlpha,
@@ -39,6 +37,10 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
             ));
         }
     };
+    let render = image.render_frame(0).map_err(failed)?;
+    // The decoder's own frame buffers go before ours is allocated.
+    drop(image);
+    let mut stream = render.stream();
     let (w, h) = (stream.width(), stream.height());
     if stream.channels() as usize != layout.channels() {
         let reason = format!("it renders {} channels", stream.channels());
