@@ -619,6 +619,7 @@ dependencies = [
  "flate2",
  "gif",
  "image",
+ "imagesize",
  "jpeg-decoder",
  "jpeg-encoder",
  "jxl-oxide",

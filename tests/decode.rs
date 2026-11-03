@@ -1040,6 +1040,12 @@ fn svgz_is_inflated_under_a_cap() {
         err.message,
         "The compressed file expands to more than 64 MiB."
     );
+    let inside = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg'><image href='data:image/svg+xml;base64,{}'/></svg>",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bomb)
+    );
+    let err = svg(&inside, &Options::default()).unwrap_err();
+    assert_eq!(err.code, "image_too_large");
     let png = gzip(&png(1, 1, Png::Grayscale, BitDepth::Eight, &[0], |_| {}));
     assert_eq!(svg::ungzip(&png).unwrap_err().code, "unsupported_format");
     assert_eq!(
@@ -1755,7 +1761,6 @@ fn a_jpeg_cut_inside_its_scans_is_corrupt_even_with_an_end_marker() {
 }
 
 #[test]
-#[ignore = "known bug: IC16"]
 fn svg_data_images_are_held_to_the_limits() {
     let image = |kind: &str, data: &[u8]| {
         format!(
@@ -1790,4 +1795,9 @@ fn svg_data_images_are_held_to_the_limits() {
     }
     let (_, bytes) = peak(&doc);
     assert!(bytes < 64 << 20, "nested: allocated {bytes} bytes");
+    // An SVG image is refused for what the file itself would be.
+    let entities = "<!DOCTYPE s [<!ENTITY a 'x'><!ENTITY b '&a;&a;'>]>
+        <svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>";
+    let doc = image("svg+xml", entities.as_bytes()) + "<use href='#i'/></svg>";
+    assert_eq!(peak(&doc).0, Some("unsupported_variant"));
 }

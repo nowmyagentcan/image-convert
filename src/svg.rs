@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use flate2::read::GzDecoder;
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::fontdb::Source;
-use resvg::usvg::{ImageHrefResolver, Options as Parse, Tree};
+use resvg::usvg::{ImageHrefResolver, ImageKind, Options as Parse, Tree};
 
 use crate::detect::{Kind, detect, find};
 use crate::error::{Error, Warning};
@@ -16,6 +16,16 @@ use crate::{Layout, Options, Pixels, Samples, resize};
 
 static NOTO_SANS: &[u8] = include_bytes!("../assets/fonts/NotoSans-Regular.ttf");
 const MAX_INFLATED: u64 = 64 << 20;
+const MAX_NESTED_SVGS: u32 = 1000;
+
+/// What the images an SVG embeds add up to, over every use of each at every depth.
+#[derive(Default)]
+struct Embedded {
+    pixels: u64,
+    svgs: u32,
+    svg_bytes: u64,
+    error: Option<Error>,
+}
 
 /// The SVG, EMF or WMF inside a gzip stream, at most 64 MiB of it.
 pub fn ungzip(data: &[u8]) -> Result<(Vec<u8>, Kind), Error> {
@@ -36,18 +46,18 @@ pub fn ungzip(data: &[u8]) -> Result<(Vec<u8>, Kind), Error> {
 /// Renders an SVG at its own size (at most 8192 px a side unless `--width`/`--height` asks) or
 /// the size `options` gives it; returns the pixels and the drawing's own size in px.
 pub fn render(data: &[u8], options: &Options) -> Result<(Pixels, (u32, u32)), Error> {
-    if data.starts_with(b"\xff\xfe") || data.starts_with(b"\xfe\xff") || data.contains(&0) {
-        return Err(Error::unsupported_variant("SVG", "UTF-16 text"));
-    }
-    if nested_entities(data) {
-        let variant = "entities that reference other entities";
-        return Err(Error::unsupported_variant("SVG", variant));
-    }
+    refuse(data)?;
     let skipped = Mutex::new(Vec::new());
+    let embedded = Mutex::new(Embedded::default());
     let mut parse = Parse {
         font_family: "serif".into(),
         image_href_resolver: ImageHrefResolver {
-            resolve_data: ImageHrefResolver::default_data_resolver(),
+            resolve_data: Box::new(|_, data, parse| {
+                embed(data, parse, &embedded).unwrap_or_else(|e| {
+                    embedded.lock().unwrap().error.get_or_insert(e);
+                    None
+                })
+            }),
             resolve_string: Box::new(|href, _| {
                 skipped.lock().unwrap().push(href.to_string());
                 None
@@ -65,8 +75,12 @@ pub fn render(data: &[u8], options: &Options) -> Result<(Pixels, (u32, u32)), Er
     fonts.set_monospace_family("Noto Sans");
     fonts.set_cursive_family("Noto Sans");
     fonts.set_fantasy_family("Noto Sans");
-    let tree = Tree::from_data(data, &parse).map_err(|e| Error::corrupt("SVG", e))?;
+    let tree = Tree::from_data(data, &parse);
     drop(parse);
+    if let Some(error) = embedded.into_inner().unwrap().error {
+        return Err(error);
+    }
+    let tree = tree.map_err(|e| Error::corrupt("SVG", e))?;
 
     let size = tree.size();
     let own = [size.width(), size.height()].map(|s| s.ceil().min(u32::MAX as f32) as u32);
@@ -93,6 +107,68 @@ pub fn render(data: &[u8], options: &Options) -> Result<(Pixels, (u32, u32)), Er
         warnings,
     };
     Ok((pixels, (own[0], own[1])))
+}
+
+/// Refuses UTF-16 text and entities that expand other entities, before parsing.
+fn refuse(data: &[u8]) -> Result<(), Error> {
+    if data.starts_with(b"\xff\xfe") || data.starts_with(b"\xfe\xff") || data.contains(&0) {
+        return Err(Error::unsupported_variant("SVG", "UTF-16 text"));
+    }
+    if nested_entities(data) {
+        let variant = "entities that reference other entities";
+        return Err(Error::unsupported_variant("SVG", variant));
+    }
+    Ok(())
+}
+
+/// A data image for usvg, held to the limits with every image resolved before it; a nested SVG
+/// resolves its own images through here again. Anything else is skipped, as usvg does.
+fn embed(
+    data: Arc<Vec<u8>>,
+    parse: &Parse,
+    budget: &Mutex<Embedded>,
+) -> Result<Option<ImageKind>, Error> {
+    if budget.lock().unwrap().error.is_some() {
+        return Ok(None);
+    }
+    let raster = match detect(&data, Path::new("")) {
+        Ok(Kind::Png) => ImageKind::PNG,
+        Ok(Kind::Jpeg) => ImageKind::JPEG,
+        Ok(Kind::Gif) => ImageKind::GIF,
+        Ok(Kind::Webp) => ImageKind::WEBP,
+        Ok(kind @ (Kind::Svg | Kind::Gzip)) => {
+            let inflated = match kind {
+                Kind::Svg => None,
+                _ => match ungzip(&data)? {
+                    (svg, Kind::Svg) => Some(svg),
+                    _ => return Ok(None),
+                },
+            };
+            let svg = inflated.as_deref().unwrap_or(&data);
+            refuse(svg)?;
+            let mut b = budget.lock().unwrap();
+            b.svgs += 1;
+            b.svg_bytes += svg.len() as u64;
+            if b.svgs > MAX_NESTED_SVGS || b.svg_bytes > MAX_INFLATED {
+                let what = "hold more than 1,000 SVG images, or more than 64 MiB of them";
+                return Err(Error::embeds_too_much(what));
+            }
+            drop(b);
+            return Ok(Tree::from_data_nested(svg, parse).ok().map(ImageKind::SVG));
+        }
+        _ => return Ok(None),
+    };
+    let Ok(size) = imagesize::blob_size(&data) else {
+        return Ok(None);
+    };
+    let (width, height) = (size.width as u64, size.height as u64);
+    let mut b = budget.lock().unwrap();
+    b.pixels += width * height;
+    if width > 65535 || height > 65535 || b.pixels > 200_000_000 {
+        let what = "add up to more than 200 megapixels, or one is over 65,535 pixels a side";
+        return Err(Error::embeds_too_much(what));
+    }
+    Ok(Some(raster(data)))
 }
 
 /// Whether an `<!ENTITY` declaration's quoted value holds `&`, so expanding it expands others.

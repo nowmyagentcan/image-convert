@@ -12,6 +12,7 @@ base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 fast_image_resize = "6.1.0"
 flate2 = "1.1.10"
+imagesize = "0.15.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "ico", "webp"] }
 jpeg-decoder = { version = "0.3.2", default-features = false }
 jpeg-encoder = { version = "0.7.1", features = ["simd"] }

@@ -249,6 +249,16 @@ impl Error {
         e("image_too_large", message, Some(too_large_hint(true)))
     }
 
+    /// An SVG whose embedded images, over every use of each, pass the limits.
+    pub fn embeds_too_much(what: &str) -> Self {
+        let message = format!("The images inside this SVG {what}.");
+        e(
+            "image_too_large",
+            message,
+            Some("Remove or shrink those images first."),
+        )
+    }
+
     pub fn corrupt(format: &str, reason: impl Display) -> Self {
         let reason = reason.to_string();
         let message = format!(
