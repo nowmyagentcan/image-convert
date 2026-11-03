@@ -52,9 +52,8 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         ));
     }
     check_size(frame.width.into(), frame.height.into(), "JPEG")?;
-    // zune-jpeg fills a cut-off image with grey; the scans of a whole one end at an EOI marker,
-    // which coded data never holds.
-    if !data[frame.scan..].windows(2).any(|w| w == [0xff, 0xd9]) {
+    // zune-jpeg fills a cut-off image with grey; the scans of a whole one end at an EOI marker.
+    if !ends(data, frame.scan) {
         return Err(Error::corrupt("JPEG", "its image data is cut short"));
     }
 
@@ -191,6 +190,30 @@ pub(crate) fn frame(data: &[u8]) -> Result<Frame, Error> {
         scan_components: data.get(at + 4).copied().unwrap_or(0),
         ..frame
     })
+}
+
+/// Whether the markers from `at` on reach an EOI: segments are skipped by their length, so the
+/// bytes FF D9 inside one don't count, and coded data (which never holds them) byte by byte.
+fn ends(data: &[u8], mut at: usize) -> bool {
+    while let Some(&marker) = data.get(at + 1) {
+        match marker {
+            0xd9 => return true,
+            // A stuffed zero, a restart marker or fill inside coded data.
+            0x00 | 0xd0..=0xd7 | 0xff => at += 1,
+            _ => match data.get(at + 2..at + 4) {
+                Some(&[hi, lo]) => at += 2 + usize::from(u16::from_be_bytes([hi, lo])),
+                _ => return false,
+            },
+        }
+        let Some(next) = data
+            .get(at..)
+            .and_then(|rest| rest.iter().position(|&b| b == 0xff))
+        else {
+            return false;
+        };
+        at += next;
+    }
+    false
 }
 
 /// YCCK as zune-jpeg gives it (Y, Cb, Cr, inverted K) to CMYK in Adobe's inverted form.

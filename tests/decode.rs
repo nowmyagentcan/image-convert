@@ -1752,12 +1752,22 @@ fn a_jpeg_cut_inside_its_scans_is_corrupt_even_with_an_end_marker() {
         cut.extend([0xff, 0xd9]);
         assert_eq!(decode(&cut).unwrap_err().code, "corrupt_image");
     }
+}
+
+#[test]
+fn end_marker_bytes_inside_a_segment_do_not_end_a_jpeg() {
     // Cut after the first of a progressive JPEG's scans; the end-marker bytes sit in an APP15.
-    let whole = progressive;
+    let whole = jpeg(64, 64, Jpeg::Rgb, &gradient(64, 64, 3), |e| {
+        e.set_progressive(true)
+    });
     let mut scans = (0..whole.len() - 1).filter(|&i| whole[i..i + 2] == [0xff, 0xda]);
-    let mut cut = whole[..scans.nth(1).unwrap()].to_vec();
+    let second = scans.nth(1).unwrap();
+    let mut cut = whole[..second].to_vec();
     cut.extend([0xff, 0xef, 0, 4, 0xff, 0xd9]);
     assert_eq!(decode(&cut).unwrap_err().code, "corrupt_image");
+    // The same segment between the scans of the whole file is skipped.
+    cut.extend(&whole[second..]);
+    assert!(decode(&cut).is_ok());
 }
 
 #[test]
