@@ -1,4 +1,5 @@
-//! JPEG through zune-jpeg, after the frame header is read and unsupported codings are refused.
+//! JPEG through zune-jpeg, after the frame header is read and unsupported codings are refused;
+//! the few layouts zune-jpeg 0.5.15 gets wrong go through jpeg-decoder.
 
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::zune_core::bytestream::ZCursor;
@@ -24,6 +25,8 @@ pub(crate) struct Frame {
     adobe: Option<u8>,
     /// Where the first scan's marker is.
     scan: usize,
+    /// How many components the first scan holds.
+    scan_components: u8,
 }
 
 /// Decodes the first image of a JPEG (MPO and Ultra HDR files hold more): grey, RGB or CMYK.
@@ -36,13 +39,6 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         0xc5 | 0xc6 => Some("hierarchical coding".into()),
         _ if frame.components == 2 || frame.components > 4 => {
             Some(format!("{} colour components", frame.components))
-        }
-        // zune-jpeg 0.5.15 decodes these to wrong colours (fixed in its 0.5.16 pre-releases).
-        _ if frame.components > 1
-            && !matches!(frame.sampling, (1, 1) | (2, 1) | (1, 2) | (2, 2) | (4, 1)) =>
-        {
-            let (h, v) = frame.sampling;
-            Some(format!("{h}×{v} sampling factors"))
         }
         _ => None,
     };
@@ -62,6 +58,52 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         return Err(Error::corrupt("JPEG", "its image data is cut short"));
     }
 
+    // zune-jpeg 0.5.15 decodes these subsampled layouts to wrong colours (fixed in its 0.5.16
+    // pre-releases): one scan per component, 4×2, 2×4 and 1×4 sampling, and CMYK.
+    let subsampled = frame.components > 1 && frame.sampling != (1, 1);
+    let odd = !matches!(frame.sampling, (2, 1) | (1, 2) | (2, 2) | (4, 1));
+    let separate = matches!(frame.marker, 0xc0 | 0xc1) && frame.scan_components < frame.components;
+    let (layout, samples, exif, icc) = if subsampled && (odd || separate || frame.components == 4) {
+        other(data, &frame)?
+    } else {
+        zune(data, &frame)?
+    };
+    let (exif, orientation) = exif_and_orientation(exif);
+    Ok(Pixels {
+        width: frame.width,
+        height: frame.height,
+        layout,
+        samples: Samples::U8(samples),
+        bit_depth: 8,
+        colour: icc.map(Colour::Icc),
+        exif,
+        orientation,
+        frames: 1,
+        warnings: Vec::new(),
+    })
+}
+
+/// The layout, the samples, the EXIF block and the ICC profile.
+type Decoded = (Layout, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// Decodes with jpeg-decoder, which gives CMYK as ink whether or not an Adobe segment says so.
+fn other(data: &[u8], frame: &Frame) -> Result<Decoded, Error> {
+    let mut decoder = jpeg_decoder::Decoder::new(data);
+    let mut samples = decoder.decode().map_err(|e| Error::corrupt("JPEG", e))?;
+    let layout = if frame.components == 3 {
+        Layout::Rgb
+    } else {
+        if frame.adobe.is_none() {
+            samples.iter_mut().for_each(|v| *v = 255 - *v);
+        }
+        Layout::Cmyk
+    };
+    let exif = decoder.exif_data().map(<[u8]>::to_vec);
+    Ok((layout, samples, exif, decoder.icc_profile()))
+}
+
+/// Decodes with zune-jpeg.
+fn zune(data: &[u8], frame: &Frame) -> Result<Decoded, Error> {
     // Four components come out raw, as zune-jpeg reads them (YCCK only after Adobe transform 2).
     let (layout, colorspace) = match (frame.components, frame.adobe) {
         (1, _) => (Layout::Grey, ColorSpace::Luma),
@@ -82,19 +124,12 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
     if layout == Layout::Cmyk && frame.adobe.is_some() {
         samples.iter_mut().for_each(|v| *v = 255 - *v);
     }
-    let (exif, orientation) = exif_and_orientation(decoder.exif().cloned());
-    Ok(Pixels {
-        width: frame.width,
-        height: frame.height,
+    Ok((
         layout,
-        samples: Samples::U8(samples),
-        bit_depth: 8,
-        colour: decoder.icc_profile().map(Colour::Icc),
-        exif,
-        orientation,
-        frames: 1,
-        warnings: Vec::new(),
-    })
+        samples,
+        decoder.exif().cloned(),
+        decoder.icc_profile(),
+    ))
 }
 
 /// Reads the markers up to the first scan: the frame header and any Adobe APP14 transform.
@@ -140,6 +175,7 @@ pub(crate) fn frame(data: &[u8]) -> Result<Frame, Error> {
                     sampling,
                     adobe: None,
                     scan: 0,
+                    scan_components: 0,
                 });
             }
             0xf7 => return Err(Error::unsupported_variant("JPEG", "JPEG-LS")),
@@ -152,6 +188,7 @@ pub(crate) fn frame(data: &[u8]) -> Result<Frame, Error> {
     Ok(Frame {
         adobe,
         scan: at,
+        scan_components: data.get(at + 4).copied().unwrap_or(0),
         ..frame
     })
 }
@@ -206,6 +243,7 @@ mod tests {
             sampling: (1, 1),
             adobe: None,
             scan: grey.windows(2).position(|w| w == [0xff, 0xda]).unwrap(),
+            scan_components: 1,
         };
         assert_eq!(frame, expected);
         let cmyk = jpeg(1, 1, ColorType::CmykAsYcck, &[0; 4]);
@@ -233,13 +271,6 @@ mod tests {
             let err = decode(&data).unwrap_err();
             assert_eq!(err.message, format!("JPEG with {variant} isn't supported."));
         }
-        let mut odd = rgb.clone();
-        odd[at + 11] = 0x42;
-        let err = decode(&odd).unwrap_err();
-        assert_eq!(
-            err.message,
-            "JPEG with 4×2 sampling factors isn't supported."
-        );
         let mut extended = rgb.clone();
         extended[at + 1] = 0xc1;
         assert_eq!(decode(&extended).unwrap().layout, Layout::Rgb);

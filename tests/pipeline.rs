@@ -891,7 +891,6 @@ fn lossy_heif_colour_is_converted_once() {
 }
 
 #[test]
-#[ignore = "known bug: IC15"]
 fn our_own_jpeg_output_reads_back_as_it_was_written() {
     // Below quality 90 the encoder writes 4:2:0 chroma, one scan per component.
     for (width, height) in [(64, 48), (53, 37)] {

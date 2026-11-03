@@ -517,36 +517,50 @@ fn jpeg_grey_rgb_every_subsampling_and_progressive() {
     assert_eq!((px.layout, px.bit_depth), (Layout::Grey, 8));
     assert!(mean_diff(u8s(&px), &grey) < 2.0);
 
-    let source = gradient(32, 24, 3);
     let factors = [
-        (SamplingFactor::F_1_1, None),
-        (SamplingFactor::F_2_1, None),
-        (SamplingFactor::F_1_2, None),
-        (SamplingFactor::F_2_2, None),
-        (SamplingFactor::F_4_1, None),
-        (SamplingFactor::F_4_2, Some("4×2")),
-        (SamplingFactor::F_1_4, Some("1×4")),
-        (SamplingFactor::F_2_4, Some("2×4")),
+        SamplingFactor::F_1_1,
+        SamplingFactor::F_2_1,
+        SamplingFactor::F_1_2,
+        SamplingFactor::F_2_2,
+        SamplingFactor::F_4_1,
+        SamplingFactor::F_4_2,
+        SamplingFactor::F_1_4,
+        SamplingFactor::F_2_4,
     ];
-    for (factor, refused) in factors {
-        for progressive in [false, true] {
-            let file = jpeg(32, 24, Jpeg::Rgb, &source, |e| {
-                e.set_sampling_factor(factor);
-                e.set_progressive(progressive);
-            });
-            if let Some(sampling) = refused {
-                let message = format!("JPEG with {sampling} sampling factors isn't supported.");
-                assert_eq!(decode(&file).unwrap_err().message, message);
-                continue;
+    let colors = [
+        (Jpeg::Rgb, Layout::Rgb),
+        (Jpeg::Cmyk, Layout::Cmyk),
+        (Jpeg::CmykAsYcck, Layout::Cmyk),
+    ];
+    for (color, layout) in colors {
+        let source = gradient(32, 24, layout.channels());
+        for factor in factors {
+            // Sparser chroma loses up to ~9 levels on this gradient; the
+            // wrong decodes these guard against were off by over 100.
+            let sparse = [
+                SamplingFactor::F_4_2,
+                SamplingFactor::F_1_4,
+                SamplingFactor::F_2_4,
+            ];
+            let bound = if sparse.contains(&factor) { 12.0 } else { 8.0 };
+            for progressive in [false, true] {
+                let file = jpeg(32, 24, color, &source, |e| {
+                    e.set_sampling_factor(factor);
+                    e.set_progressive(progressive);
+                });
+                let px = decode(&file).unwrap();
+                assert_eq!((px.width, px.height, px.layout), (32, 24, layout));
+                let diff = mean_diff(u8s(&px), &source);
+                assert!(
+                    diff < bound,
+                    "{color:?} {factor:?} progressive {progressive}: {diff}"
+                );
             }
-            let px = decode(&file).unwrap();
-            assert_eq!((px.width, px.height, px.layout), (32, 24, Layout::Rgb));
-            let diff = mean_diff(u8s(&px), &source);
-            assert!(diff < 8.0, "{factor:?} progressive {progressive}: {diff}");
         }
     }
 
     // SOF1 (extended sequential) is baseline's superset: the same file with its marker changed.
+    let source = gradient(32, 24, 3);
     let mut extended = jpeg(32, 24, Jpeg::Rgb, &source, |_| {});
     let at = extended.windows(2).position(|w| w == [0xff, 0xc0]).unwrap();
     extended[at + 1] = 0xc1;
@@ -1700,7 +1714,6 @@ fn jpeg_xl_orientation_is_reported_with_the_stored_size() {
 }
 
 #[test]
-#[ignore = "known bug: IC15"]
 fn jpeg_with_one_scan_per_component_decodes() {
     // jpeg-encoder writes each component's scan separately once its Huffman tables are optimised.
     let source = gradient(53, 37, 3);
