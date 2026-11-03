@@ -240,7 +240,10 @@ fn main() -> ExitCode {
     match args.get(1).and_then(|a| a.to_str()) {
         Some("convert") => drop(args.remove(1)),
         Some("formats") => {
-            let cli = Formats::parse_from(&args[1..]);
+            let cli: Formats = match parse(Formats::command(), &args[1..]) {
+                Ok(cli) => cli,
+                Err(code) => return code,
+            };
             let mut out = Out::new(io::stdout().lock(), Look::stdout());
             return finish(formats(cli.json, &mut out).map(|()| 0));
         }
@@ -266,19 +269,10 @@ fn main() -> ExitCode {
         let run = interactive::run(io::stdin().lock(), &mut out, &mut err, convert);
         return finish(run.map(|()| 0));
     }
-    let json = args
-        .iter()
-        .skip(1)
-        .take_while(|a| *a != "--")
-        .any(|a| a == "--json");
-    let parsed = Cli::command()
-        .after_help(format!("{READS}\n\n{EXAMPLES}"))
-        .try_get_matches_from(&args)
-        .and_then(|m| Cli::from_arg_matches(&m));
-    let cli = match parsed {
+    let command = Cli::command().after_help(format!("{READS}\n\n{EXAMPLES}"));
+    let cli: Cli = match parse(command, &args) {
         Ok(cli) => cli,
-        Err(e) if json && e.use_stderr() => return fail(&Error::usage(clap_message(&e)), true),
-        Err(e) => e.exit(),
+        Err(code) => return code,
     };
     let mut options = match cli.options() {
         Ok(options) => options,
@@ -419,6 +413,24 @@ fn formats(json: bool, out: &mut Out<impl Write>) -> io::Result<()> {
 
 /// Reports an error that stops the run, as two lines on stderr or as JSON on stdout, and
 /// exits with its code.
+/// Parses `args` with `command`; a usage error is a JSON object when `--json` comes before any
+/// `--`, else clap's own text.
+fn parse<T: FromArgMatches>(command: clap::Command, args: &[OsString]) -> Result<T, ExitCode> {
+    let json = args
+        .iter()
+        .skip(1)
+        .take_while(|a| *a != "--")
+        .any(|a| a == "--json");
+    match command
+        .try_get_matches_from(args)
+        .and_then(|m| T::from_arg_matches(&m))
+    {
+        Ok(parsed) => Ok(parsed),
+        Err(e) if json && e.use_stderr() => Err(fail(&Error::usage(clap_message(&e)), true)),
+        Err(e) => e.exit(),
+    }
+}
+
 fn fail(e: &Error, json: bool) -> ExitCode {
     let _ = if json {
         writeln!(io::stdout(), "{}", e.to_json())

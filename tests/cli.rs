@@ -950,7 +950,6 @@ fn runs_at_the_same_time_never_replace_each_others_outputs() {
 }
 
 #[test]
-#[ignore = "known bug: IC07"]
 fn formats_usage_errors_are_json_with_json() {
     let r = run(
         &folder("formats-usage"),
