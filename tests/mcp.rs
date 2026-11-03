@@ -53,6 +53,13 @@ fn folder(test: &str) -> PathBuf {
 /// Sends each message from `dir`, closes stdin, and returns the responses by id and the exit
 /// code. The server writes nothing to stderr.
 fn session(dir: &Path, messages: &[Value]) -> (Vec<Value>, i32) {
+    let (responses, code, stderr) = logged_session(dir, messages);
+    assert_eq!(stderr, "");
+    (responses, code)
+}
+
+/// A session that also returns stderr, where an OS decoder may log.
+fn logged_session(dir: &Path, messages: &[Value]) -> (Vec<Value>, i32, String) {
     let mut child = Command::new(BIN)
         .arg("mcp")
         .current_dir(dir)
@@ -67,14 +74,14 @@ fn session(dir: &Path, messages: &[Value]) -> (Vec<Value>, i32) {
     }
     drop(stdin);
     let out = child.wait_with_output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     let mut responses: Vec<Value> = String::from_utf8(out.stdout)
         .unwrap()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     responses.sort_by_key(|r| r["id"].as_u64());
-    (responses, out.status.code().unwrap())
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    (responses, out.status.code().unwrap(), stderr)
 }
 
 /// The CLI's `--json` output for the same input, run from `dir`.
@@ -374,7 +381,9 @@ fn views_an_image_sized_for_vision_without_writing() {
     let heic = os_heif("heif-irot.heic").is_some();
     fs::write(dir.join("irot.heic"), fixture("heif-irot.heic")).unwrap();
     messages.push(view(11, json!({"path": "irot.heic"})));
-    let (responses, code) = session(&dir, &messages);
+    // macOS's ImageIO may log to stderr on virtual machines; nothing else may.
+    let (responses, code, stderr) = logged_session(&dir, &messages);
+    assert!(stderr.is_empty() || heic, "{stderr}");
     assert_eq!((code, responses.len()), (0, 11));
     let (file, size) = check_view(&responses[1]);
     assert_eq!(size, (1238, 928));
