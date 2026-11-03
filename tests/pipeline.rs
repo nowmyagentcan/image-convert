@@ -842,7 +842,6 @@ fn keep_exif_copies_the_block_with_orientation_one() {
 }
 
 #[test]
-#[ignore = "known bug: IC03"]
 fn only_a_real_srgb_profile_skips_the_conversion() {
     use moxcms::{ProfileText, ToneReprCurve};
     let with = |profile: ColorProfile| {

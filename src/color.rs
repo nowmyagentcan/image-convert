@@ -117,14 +117,31 @@ fn through_profile(
 ) -> Result<(Option<String>, Converted), String> {
     let source = ColorProfile::new_from_slice(icc).map_err(|e| lower_first(&e.to_string()))?;
     let name = source.description.as_ref().and_then(text);
-    if source.color_space == DataColorSpace::Rgb && layout != Layout::Cmyk && is_srgb(&name) {
+    if layout != Layout::Cmyk && is_srgb(&source) {
         return Ok((name, None));
     }
     Ok((name, Some(transform(&source, layout, samples)?)))
 }
 
-fn is_srgb(name: &Option<String>) -> bool {
-    name.as_deref().is_some_and(|n| n.contains("sRGB"))
+/// Whether an RGB profile leaves colours as they are in sRGB, whatever its name says: a grid of
+/// colours must come through it within 2 levels.
+fn is_srgb(source: &ColorProfile) -> bool {
+    let rgb = moxcms::Layout::Rgb;
+    let options = TransformOptions {
+        rendering_intent: RenderingIntent::RelativeColorimetric,
+        ..TransformOptions::default()
+    };
+    let srgb = ColorProfile::new_srgb();
+    let transform = source.create_transform_8bit(rgb, &srgb, rgb, options);
+    let (DataColorSpace::Rgb, Ok(t)) = (source.color_space, transform) else {
+        return false;
+    };
+    let level = || (0..=255u8).step_by(15);
+    let grid: Vec<u8> = level()
+        .flat_map(|r| level().flat_map(move |g| level().flat_map(move |b| [r, g, b])))
+        .collect();
+    let mut out = vec![0; grid.len()];
+    t.transform(&grid, &mut out).is_ok() && grid.iter().zip(&out).all(|(a, b)| a.abs_diff(*b) <= 2)
 }
 
 /// How results name a source's colour that the OS decoder has already converted to sRGB.
@@ -132,11 +149,10 @@ pub fn describe(colour: Option<&Colour>) -> Color {
     let (srgb, profile) = match colour {
         None => (true, None),
         Some(Colour::Converted(reported)) => return reported.clone(),
-        Some(Colour::Icc(icc)) => {
-            let source = ColorProfile::new_from_slice(icc).ok();
-            let name = source.and_then(|s| s.description.as_ref().and_then(text));
-            (is_srgb(&name), name)
-        }
+        Some(Colour::Icc(icc)) => match ColorProfile::new_from_slice(icc) {
+            Ok(source) => (is_srgb(&source), source.description.as_ref().and_then(text)),
+            Err(_) => (false, None),
+        },
         Some(Colour::Cicp(cicp)) => match cicp_profile(*cicp) {
             Ok(None) => (true, None),
             Ok(Some((_, name, _))) => (false, Some(name.into())),
