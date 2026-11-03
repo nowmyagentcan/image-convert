@@ -550,6 +550,11 @@ fn a_control_byte_in_any_header_is_refused() {
 /// default is sent, whichever field it is in.
 #[test]
 fn the_page_sends_each_option_that_differs_from_its_default() {
+    if Command::new("node").arg("--version").output().is_err() {
+        assert!(!required("node"), "node isn't on PATH");
+        eprintln!("skipped: the page's script needs node on PATH");
+        return;
+    }
     let line = |start: &str| {
         let found = PAGE.lines().map(str::trim).find(|l| l.starts_with(start));
         found.unwrap_or_else(|| panic!("no line starting {start}"))

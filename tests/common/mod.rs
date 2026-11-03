@@ -454,12 +454,10 @@ pub fn os_heif(name: &str) -> Option<image_convert::Pixels> {
     let data = fixture(name);
     let kind = detect::detect(&data, std::path::Path::new(name)).unwrap();
     let heif = bmff::heif(&data, kind).unwrap();
-    let required = std::env::var("IMAGE_CONVERT_TEST_REQUIRE")
-        .is_ok_and(|v| v.split(',').any(|f| f == heif.kind.name()));
     match os::heif_available(heif.kind) {
         Ok(()) => Some(os::decode_heif(&data, &heif).unwrap()),
         Err(missing) => {
-            assert!(!required, "{name}: {}", missing.message);
+            assert!(!required(&heif.kind.name()), "{name}: {}", missing.message);
             assert_eq!(os::decode_heif(&data, &heif), Err(missing));
             None
         }
@@ -599,4 +597,9 @@ pub fn cr3(sample: &[u8], prvw: &[u8], cmt1: &[u8]) -> Vec<u8> {
         &[bx(b"uuid", &metadata), stbl(offset as u32)].concat(),
     );
     [ftyp, moov, bx(b"uuid", &preview), bx(b"mdat", sample)].concat()
+}
+
+/// Whether `IMAGE_CONVERT_TEST_REQUIRE` names `what`, so a test may not skip for its absence.
+pub fn required(what: &str) -> bool {
+    std::env::var("IMAGE_CONVERT_TEST_REQUIRE").is_ok_and(|v| v.split(',').any(|f| f == what))
 }

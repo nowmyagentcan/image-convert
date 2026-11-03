@@ -26,9 +26,9 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libheif1 libheif-plugin-libde265 libheif-plugin-dav1d
       - run: cargo test --locked
         env:
-          # ImageIO and libheif with both plugins must decode both. Windows runners have no
-          # Store extensions, so there the tests follow what `formats` reports.
-          IMAGE_CONVERT_TEST_REQUIRE: ${{ runner.os != 'Windows' && 'heic,avif' || '' }}
+          # ImageIO and libheif with both plugins must decode both; Windows runners have no Store
+          # extensions, so there the tests follow what `formats` reports. Every runner has Node.
+          IMAGE_CONVERT_TEST_REQUIRE: ${{ runner.os != 'Windows' && 'heic,avif,node' || 'node' }}
       - name: A double-clicked exe opens the page (opens the runner's browser)
         if: runner.os == 'Windows'
         run: cargo test --locked --test ui -- --ignored --exact a_double_click_starts_the_page
