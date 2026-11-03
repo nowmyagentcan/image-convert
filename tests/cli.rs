@@ -213,7 +213,7 @@ fn every_file_error_has_its_message_and_hint_in_text_and_json() {
             .hint("Convert it to PNG or JPEG in the app that made it."),
         case("huge.png", huge, "image_too_large", "The image is 100000×100000 pixels; the limit is 200 megapixels and 65,535 pixels per side.")
             .hint("Crop it first."),
-        case("wide.svg", svg, "image_too_large", "The image is 20000×20000 pixels; the limit is 200 megapixels and 65,535 pixels per side.")
+        case("wide.svg", svg, "image_too_large", "The image would render at 20000×20000 pixels; the limit is 200 megapixels and 16,384 pixels per side.")
             .hint("Use --width or --height to render it smaller.")
             .args(&["--width", "20000"]),
         case("cut.png", damaged, "corrupt_image", "Can't decode this PNG file: ").hint(damaged_hint),
@@ -961,7 +961,6 @@ fn formats_usage_errors_are_json_with_json() {
 }
 
 #[test]
-#[ignore = "known bug: IC09"]
 fn a_drawing_asked_over_16384_px_names_that_limit() {
     let dir = folder("vector-limit");
     let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="1"/>"#;

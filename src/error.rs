@@ -229,10 +229,16 @@ impl Error {
         e("codec_missing", message, hint)
     }
 
-    /// A raster image over 200 MP or 65,535 px per side; `vector` sources get a sizing hint.
+    /// An image over 200 MP or 65,535 px per side, or a `vector` render over 200 MP or 16,384 px
+    /// per side, which also gets a sizing hint.
     pub fn image_too_large(width: u64, height: u64, vector: bool) -> Self {
+        let (what, side) = if vector {
+            ("would render at", "16,384")
+        } else {
+            ("is", "65,535")
+        };
         let message = format!(
-            "The image is {width}×{height} pixels; the limit is 200 megapixels and 65,535 pixels per side."
+            "The image {what} {width}×{height} pixels; the limit is 200 megapixels and {side} pixels per side."
         );
         e("image_too_large", message, Some(too_large_hint(vector)))
     }
