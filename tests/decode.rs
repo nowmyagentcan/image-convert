@@ -48,7 +48,7 @@ fn decode(data: &[u8]) -> Result<Pixels, Error> {
     match detect(data, Path::new("input"))? {
         Kind::Jpeg => jpeg::decode(data),
         Kind::Tiff => tif::decode(data),
-        Kind::Jxl => jxl::decode(data),
+        Kind::Jxl => jxl::decode(data).map(|(px, _)| px),
         kind => raster::decode(data, kind),
     }
 }
@@ -1680,7 +1680,6 @@ fn gif_screen_outside_the_first_frame_is_transparent_as_browsers_draw_it() {
 }
 
 #[test]
-#[ignore = "known bug: IC05"]
 fn jpeg_xl_orientation_is_reported_with_the_stored_size() {
     for orientation in 1..=8u8 {
         let mut data = fixture("jxl-anim.jxl");

@@ -5,9 +5,9 @@ use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, Moxcms, PixelFormat,
 use crate::error::{Error, Warning};
 use crate::{Layout, Pixels, Samples, check_size};
 
-/// Decodes the first frame of a JPEG XL file to sRGB grey, RGB or either with alpha; the
-/// orientation is already applied.
-pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
+/// Decodes the first frame of a JPEG XL file to sRGB grey, RGB or either with alpha, with the
+/// orientation already applied; also gives the stored size and the orientation.
+pub fn decode(data: &[u8]) -> Result<(Pixels, (u32, u32, u8)), Error> {
     let failed = |e: Box<dyn std::error::Error + Send + Sync>| Error::corrupt("JPEG XL", e);
     let mut image = JxlImage::builder()
         .alloc_tracker(AllocTracker::with_limit(2 << 30))
@@ -15,7 +15,10 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         .map_err(failed)?;
     let (width, height) = (image.width(), image.height());
     check_size(width.into(), height.into(), "JPEG XL")?;
-    let metadata = &image.image_header().metadata;
+    let header = image.image_header();
+    let stored = (header.size.width, header.size.height);
+    let metadata = &header.metadata;
+    let orientation = metadata.orientation as u8;
     let bits = metadata.bit_depth.bits_per_sample();
     let encoding = if metadata.grayscale() {
         EnumColourEncoding::gray_srgb(RenderingIntent::Perceptual)
@@ -56,7 +59,7 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         stream.write_to_buffer(&mut buf);
         Samples::U8(buf)
     };
-    Ok(Pixels {
+    let px = Pixels {
         width: w,
         height: h,
         layout,
@@ -70,5 +73,6 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
             .then(Warning::first_frame_only)
             .into_iter()
             .collect(),
-    })
+    };
+    Ok((px, (stored.0, stored.1, orientation)))
 }

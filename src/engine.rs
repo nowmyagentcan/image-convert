@@ -153,7 +153,8 @@ fn run(data: &[u8], options: &Options, file: &mut FileResult) -> Result<Vec<u8>,
     let builtin = "builtin";
     let mut alpha = None;
     // The pixels, the decoder, and the size and orientation results report when they aren't
-    // the pixels' own: a drawing's size before rendering, a HEIF image's before the OS turned it.
+    // the pixels' own: a drawing's size before rendering, a HEIF or JPEG XL image's before the
+    // decoder turned it.
     let (px, decoder, stored): (Pixels, _, Option<(u32, u32, u8)>) = match kind {
         Kind::Svg => {
             let (px, (w, h)) = svg::render(data, options)?;
@@ -179,7 +180,10 @@ fn run(data: &[u8], options: &Options, file: &mut FileResult) -> Result<Vec<u8>,
         }
         Kind::Jpeg => (jpeg::decode(data)?, builtin, None),
         Kind::Tiff => (tiff::decode(data)?, builtin, None),
-        Kind::Jxl => (jxl::decode(data)?, builtin, None),
+        Kind::Jxl => {
+            let (px, stored) = jxl::decode(data)?;
+            (px, builtin, Some(stored))
+        }
         Kind::Cr2
         | Kind::Cr3
         | Kind::Nef
