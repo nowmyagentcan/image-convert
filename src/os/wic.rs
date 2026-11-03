@@ -16,6 +16,7 @@ use windows::Win32::System::Variant::VT_UI2;
 use windows::core::{Interface, w};
 
 use crate::bmff::Heif;
+use crate::color::{Colour, describe};
 use crate::detect::Kind;
 use crate::error::{Codec, Error, Warning};
 use crate::{Layout, Pixels, Samples};
@@ -162,13 +163,21 @@ pub fn decode(data: &[u8], heif: &Heif) -> Result<Pixels, Error> {
             .filter(|o| (1..=8).contains(o))
             .map_or_else(|| heif.orientation(), |o| o as u8);
 
+        // Media Foundation turns YCbCr described by code points into sRGB itself (HDR tone
+        // mapped); RGB (matrix 0) and profile-described images come out in their own colour.
+        let colour = match &heif.colour {
+            Some(Colour::Cicp(cicp)) if cicp.matrix != 0 => {
+                Some(Colour::Converted(describe(heif.colour.as_ref())))
+            }
+            _ => None,
+        };
         Ok(Pixels {
             width,
             height,
             layout: Layout::Rgba,
             samples: Samples::U8(rgba),
             bit_depth: 8,
-            colour: None,
+            colour,
             exif: None,
             orientation,
             frames: 1,

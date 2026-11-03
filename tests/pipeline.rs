@@ -875,7 +875,6 @@ fn only_a_real_srgb_profile_skips_the_conversion() {
 }
 
 #[test]
-#[ignore = "known bug: IC11"]
 fn lossy_heif_colour_is_converted_once() {
     let Some(mut px) = os_heif("heif-p3-yuv.avif") else {
         return;
