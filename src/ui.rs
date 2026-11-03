@@ -153,14 +153,14 @@ fn respond(reader: &mut BufReader<io::Take<&TcpStream>>, port: u16) -> io::Resul
                 && n.iter()
                     .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
         };
-        // RFC 9110 §5.5: a NUL or CR inside a field value makes it invalid; only the line's
-        // own CRLF ends it.
+        // RFC 9110 §5.5: a field value is visible bytes, spaces and tabs; any other control byte
+        // makes it invalid, and only the line's own CRLF ends it.
         let value = |v: &[u8]| {
             let v = v
                 .strip_suffix(b"\r\n")
                 .or(v.strip_suffix(b"\n"))
                 .unwrap_or(v);
-            !v.iter().any(|b| b"\0\r".contains(b))
+            !v.iter().any(|&b| (b < b' ' && b != b'\t') || b == 0x7f)
         };
         let Some(colon) = line
             .iter()

@@ -540,7 +540,6 @@ fn a_double_click_starts_the_page() {
 }
 
 #[test]
-#[ignore = "known bug: IC08"]
 fn a_control_byte_in_any_header_is_refused() {
     let server = Server::start(&["--no-open"]);
     let head = "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Other: a\x01b";
