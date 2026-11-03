@@ -181,7 +181,7 @@ fn view(args: ViewArgs) -> Result<CallToolResult, Error> {
 /// Converts and writes every path as the CLI does, answering with its `--json` object.
 fn convert(args: ConvertArgs) -> Result<CallToolResult, Error> {
     if args.paths.is_empty() {
-        return Err(Error::no_input());
+        return Err(bad_argument("Pass at least one path.".into()));
     }
     if args.paths.len() > 1000 {
         return Err(bad_argument("Pass at most 1000 paths per call.".into()));

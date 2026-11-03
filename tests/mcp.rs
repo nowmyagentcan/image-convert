@@ -346,15 +346,20 @@ fn converts_like_the_cli_after_an_initialize_handshake() {
     );
     check_answer(&responses[3], &second);
     assert!(dir.join("out/logo.png").is_file());
-    check_error(&responses[4], &cli(&twin, &[]));
     check_error(&responses[5], &cli(&twin, &["photo.png", "--quality", "0"]));
     check_error(&responses[6], &cli(&twin, &["photo.png", "--fit", "huge"]));
     check_error(
         &responses[7],
         &cli(&twin, &["photo.png", "--max-bytes", "5"]),
     );
-    for response in &responses[8..] {
+    // Argument mistakes carry no CLI hint, an empty path list included.
+    for response in [&responses[4]].into_iter().chain(&responses[8..]) {
         assert_eq!(error_code(response), "usage");
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(text).unwrap()["error"]["hint"],
+            Value::Null
+        );
     }
 }
 
