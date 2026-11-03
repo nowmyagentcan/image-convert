@@ -894,3 +894,97 @@ fn interactive_mode_converts_dropped_paths_in_a_terminal() {
     assert_eq!((piped.code, piped.stdout.as_str()), (2, ""));
     assert!(piped.stderr.starts_with("✗ No file given.\n"));
 }
+
+/// Runs started together into one folder, each input coloured differently under the same name.
+#[test]
+#[ignore = "known bug: IC01"]
+fn runs_at_the_same_time_never_replace_each_others_outputs() {
+    let dir = folder("together");
+    let colour = |i: usize| [i as u8 * 10, 255 - i as u8 * 10, 7];
+    for i in 0..24 {
+        let mut rgb = gradient(512, 512, 3);
+        rgb[..3].copy_from_slice(&colour(i));
+        let file = png(
+            512,
+            512,
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            &rgb,
+            |_| {},
+        );
+        fs::create_dir_all(dir.join(i.to_string())).unwrap();
+        fs::write(dir.join(format!("{i}/same.png")), file).unwrap();
+    }
+    let all = |out: &str| {
+        let children: Vec<_> = (0..24)
+            .map(|i| {
+                Command::new(env!("CARGO_BIN_EXE_image-convert"))
+                    .args([&format!("{i}/same.png"), "-o", out, "--json"])
+                    .current_dir(&dir)
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        let outputs = children
+            .into_iter()
+            .map(|c| c.wait_with_output().unwrap().stdout);
+        outputs
+            .map(|o| serde_json::from_slice::<Value>(&o).unwrap()["files"][0]["output"].clone())
+            .collect::<Vec<_>>()
+    };
+    for (i, output) in all("out/").iter().enumerate() {
+        let written = image::open(dir.join(output.as_str().unwrap())).unwrap();
+        assert_eq!(written.to_rgb8().get_pixel(0, 0).0, colour(i), "{output}");
+    }
+    // Without --overwrite, one run writes `-o FILE` and the others find it there.
+    let written = all("one.png").iter().filter(|o| !o.is_null()).count();
+    assert_eq!(written, 1);
+}
+
+#[test]
+#[ignore = "known bug: IC07"]
+fn formats_usage_errors_are_json_with_json() {
+    let r = run(
+        &folder("formats-usage"),
+        &["formats", "--json", "--bogus"],
+        None,
+    );
+    assert_eq!(r.code, 2);
+    assert_eq!(r.json()["error"]["code"], "usage");
+}
+
+#[test]
+#[ignore = "known bug: IC09"]
+fn a_drawing_asked_over_16384_px_names_that_limit() {
+    let dir = folder("vector-limit");
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="1"/>"#;
+    fs::write(dir.join("wide.svg"), svg).unwrap();
+    let r = run(&dir, &["wide.svg", "--width", "20000", "--json"], None);
+    let error = &r.json()["files"][0]["error"];
+    assert_eq!(error["code"], "image_too_large");
+    assert!(
+        error["message"].as_str().unwrap().contains("16,384"),
+        "{error}"
+    );
+}
+
+#[test]
+#[ignore = "known bug: IC10"]
+fn a_gzip_that_inflates_too_far_gets_no_sizing_hint() {
+    use flate2::{Compression, write::GzEncoder};
+    let dir = folder("inflate-limit");
+    let mut gz = GzEncoder::new(Vec::new(), Compression::fast());
+    gz.write_all(br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">"#)
+        .unwrap();
+    gz.write_all(&vec![b' '; 65 << 20]).unwrap();
+    gz.write_all(b"</svg>").unwrap();
+    fs::write(dir.join("big.svgz"), gz.finish().unwrap()).unwrap();
+    let r = run(&dir, &["big.svgz", "--width", "1", "--json"], None);
+    let error = &r.json()["files"][0]["error"];
+    assert_eq!(error["code"], "image_too_large");
+    assert!(
+        !error["hint"].as_str().unwrap_or("").contains("--width"),
+        "{error}"
+    );
+}

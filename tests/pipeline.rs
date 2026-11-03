@@ -840,3 +840,37 @@ fn keep_exif_copies_the_block_with_orientation_one() {
         );
     }
 }
+
+#[test]
+#[ignore = "known bug: IC03"]
+fn only_a_real_srgb_profile_skips_the_conversion() {
+    use moxcms::{ProfileText, ToneReprCurve};
+    let with = |profile: ColorProfile| {
+        let icc = profile.encode().unwrap();
+        let file = png(
+            1,
+            1,
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            &[128, 64, 32],
+            |info| info.icc_profile = Some(icc.into()),
+        );
+        let (image, color) = to_srgb(&mut decode(&file));
+        (color.kind, image.data)
+    };
+    assert_eq!(with(ColorProfile::new_srgb()), ("srgb", vec![128, 64, 32]));
+    // Linear light under a name that says sRGB, as Krita's and GIMP's linear profiles are named.
+    let mut linear = ColorProfile::new_srgb();
+    let curve = Some(ToneReprCurve::Parametric(vec![1.0]));
+    (linear.red_trc, linear.green_trc, linear.blue_trc) = (curve.clone(), curve.clone(), curve);
+    linear.cicp = None;
+    linear.description = Some(ProfileText::PlainString("Linear sRGB".into()));
+    let (kind, data) = with(linear);
+    assert_eq!(kind, "converted");
+    // The sRGB encodings of 128, 64 and 32 / 255 in linear light.
+    let expected = [188, 137, 99];
+    assert!(
+        data.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 2),
+        "{data:?}"
+    );
+}

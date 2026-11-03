@@ -1658,3 +1658,45 @@ fn heif_state_matches_the_installed_packages() {
         assert_eq!(got.map(|e| e.message), expected, "{name}");
     }
 }
+
+#[test]
+#[ignore = "known bug: IC02"]
+fn a_jpeg_cut_inside_its_scans_is_corrupt() {
+    for progressive in [false, true] {
+        let whole = jpeg(64, 64, Jpeg::Rgb, &gradient(64, 64, 3), |e| {
+            e.set_progressive(progressive)
+        });
+        let err = decode(&whole[..whole.len() * 3 / 4]).unwrap_err();
+        assert_eq!(err.code, "corrupt_image", "progressive {progressive}");
+    }
+}
+
+#[test]
+fn gif_screen_outside_the_first_frame_is_transparent_as_browsers_draw_it() {
+    // No transparent index: the uncovered screen still isn't filled with the background colour.
+    let px = decode(&gif((4, 3), None, &[(1, 1, 2, 2, vec![0, 1, 2, 3])])).unwrap();
+    let a = alpha(&px);
+    let opaque: Vec<usize> = (0..12).filter(|&i| a[i] == 255).collect();
+    assert_eq!(opaque, [5, 6, 9, 10]);
+}
+
+#[test]
+#[ignore = "known bug: IC05"]
+fn jpeg_xl_orientation_is_reported_with_the_stored_size() {
+    for orientation in 1..=8u8 {
+        let mut data = fixture("jxl-anim.jxl");
+        // This file's 3 orientation bits (value - 1) are bits 3 to 5 of byte 3.
+        data[3] = data[3] & !0x38 | (orientation - 1) << 3;
+        let (file, _) = engine::convert("x.jxl".into(), &data, &Options::default());
+        let source = file.source.unwrap();
+        assert_eq!(
+            (source.width, source.height, source.orientation),
+            (64, 48, orientation)
+        );
+        let upright = if orientation > 4 { (48, 64) } else { (64, 48) };
+        assert_eq!(
+            (file.width, file.height),
+            (Some(upright.0), Some(upright.1))
+        );
+    }
+}
