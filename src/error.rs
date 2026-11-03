@@ -240,13 +240,22 @@ impl Error {
         let message = format!(
             "The image {what} {width}×{height} pixels; the limit is 200 megapixels and {side} pixels per side."
         );
-        e("image_too_large", message, Some(too_large_hint(vector)))
+        let hint = if vector {
+            "Use --width or --height to render it smaller."
+        } else {
+            "Crop it first."
+        };
+        e("image_too_large", message, Some(hint))
     }
 
     /// A `.svgz`, `.emz` or `.wmz` that inflates past 64 MiB.
     pub fn inflates_too_large() -> Self {
         let message = "The compressed file expands to more than 64 MiB.";
-        e("image_too_large", message, Some(too_large_hint(true)))
+        e(
+            "image_too_large",
+            message,
+            Some("Simplify the drawing first."),
+        )
     }
 
     /// An SVG whose embedded images, over every use of each, pass the limits.
@@ -417,14 +426,6 @@ impl Error {
 
     pub fn io(cause: impl Display) -> Self {
         e("io", format!("Can't write output: {cause}."), None)
-    }
-}
-
-fn too_large_hint(vector: bool) -> &'static str {
-    if vector {
-        "Use --width or --height to render it smaller."
-    } else {
-        "Crop it first."
     }
 }
 

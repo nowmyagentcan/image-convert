@@ -975,7 +975,6 @@ fn a_drawing_asked_over_16384_px_names_that_limit() {
 }
 
 #[test]
-#[ignore = "known bug: IC10"]
 fn a_gzip_that_inflates_too_far_gets_no_sizing_hint() {
     use flate2::{Compression, write::GzEncoder};
     let dir = folder("inflate-limit");
