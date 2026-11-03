@@ -546,3 +546,35 @@ fn a_control_byte_in_any_header_is_refused() {
     let head = "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Other: a\x01b";
     assert_eq!(server.send(head, b"").0, 400);
 }
+
+/// The page's own option filter, run in Node: every value that differs from the form's
+/// default is sent, whichever field it is in.
+#[test]
+fn the_page_sends_each_option_that_differs_from_its_default() {
+    let line = |start: &str| {
+        let found = PAGE.lines().map(str::trim).find(|l| l.starts_with(start));
+        found.unwrap_or_else(|| panic!("no line starting {start}"))
+    };
+    let sent = |opts: &str| {
+        let script = format!(
+            "{}\n{}\nconsole.log(JSON.stringify(sent({opts})))",
+            line("const DEFAULTS"),
+            line("function sent(")
+        );
+        let out = Command::new("node").args(["-e", &script]).output();
+        let out = out.expect("Node runs the page's script");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let defaults = r#"{ to: "auto", fit: "none", max_side: 0, max_bytes: 0, quality: 85, background: "white", keep_exif: false }"#;
+    assert_eq!(sent(defaults), json!({}));
+    let changed = r#"{ to: "png", fit: "vision", max_side: 85, max_bytes: 85000, quality: 84, background: "", keep_exif: true }"#;
+    assert_eq!(
+        sent(changed),
+        json!({"to": "png", "fit": "vision", "max_side": 85, "max_bytes": 85000, "quality": 84, "keep_exif": true})
+    );
+}

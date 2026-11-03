@@ -179,6 +179,10 @@ const tooBig = file => ({ file: { input: file.name, output: null, input_format: 
 
 let chosen = [], latest = 0, pasted = 0, urls = [];
 
+// Only what differs from the defaults is sent, so the server can still lower an unset quality to fit a size limit.
+const DEFAULTS = { to: "auto", fit: "none", quality: 85, background: "white" };
+function sent(opts) { return Object.fromEntries(Object.entries(opts).filter(([k, v]) => v && v !== DEFAULTS[k])); }
+
 function choose(files) {
   if (!files.length) return;
   chosen = [...files];
@@ -196,10 +200,8 @@ form.addEventListener("submit", async ev => {
     failure(out, { message: "No image chosen.", hint: "Drop images above, click the box to choose them, or paste one." });
     return;
   }
-  // Only what differs from the defaults is sent, so the server can still lower an unset quality to fit a size limit.
-  const opts = { to: $("#to").value, fit: $("#fit").value, max_side: Number($("#side").value), max_bytes: $("#kb").value * 1000,
-    quality: Number($("#quality").value), background: $("#bg").value.trim(), keep_exif: $("#exif").checked };
-  for (const [k, v] of Object.entries(opts)) if (!v || v === "auto" || v === "none" || v === 85 || v === "white") delete opts[k];
+  const opts = sent({ to: $("#to").value, fit: $("#fit").value, max_side: Number($("#side").value), max_bytes: $("#kb").value * 1000,
+    quality: Number($("#quality").value), background: $("#bg").value.trim(), keep_exif: $("#exif").checked });
   urls.forEach(URL.revokeObjectURL); urls = [];
   const status = el("div", "head");
   out.replaceChildren(status);
