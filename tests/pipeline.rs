@@ -874,3 +874,20 @@ fn only_a_real_srgb_profile_skips_the_conversion() {
         "{data:?}"
     );
 }
+
+#[test]
+#[ignore = "known bug: IC11"]
+fn lossy_heif_colour_is_converted_once() {
+    let Some(mut px) = os_heif("heif-p3-yuv.avif") else {
+        return;
+    };
+    let (image, _) = to_srgb(&mut px);
+    let rgb: Vec<u8> = image
+        .data
+        .chunks(4)
+        .flat_map(|p| &p[..3])
+        .copied()
+        .collect();
+    let worst = worst_delta_e(&rgb, &p3_patches().1);
+    assert!(worst <= 2.0, "ΔE2000 {worst}");
+}

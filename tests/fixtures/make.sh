@@ -99,7 +99,8 @@ rm jxl-anim.gif
 # heif-irot.*: a JPEG with EXIF orientation 6, which heif-enc turns into irot; the EXIF item's
 # orientation is then set back to 6, so a decoder that also applied it would rotate twice.
 # heif-irot-ref.png is the JPEG's pixels upright. heif-p3.avif holds the Display P3 patches of
-# tests/pipeline.rs under nclx code points 12/13/0; heif-adobergb.heic the Adobe RGB patches
+# tests/pipeline.rs under nclx code points 12/13/0 (heif-p3-yuv.avif: the same as lossy YCbCr under
+# 12/13/1); heif-adobergb.heic the Adobe RGB patches
 # with their ICC profile; heif-alpha.avif an alpha gradient; heif-10bit.avif a 16-bit gradient,
 # lossy YCbCr (WIC misreads 10-bit samples under the identity matrix).
 lossless="-L -p chroma=444 --matrix_coefficients=0"
@@ -168,6 +169,7 @@ for name in ('heif-irot.heic', 'heif-irot.avif'):
     open(name, 'wb').write(data)
 PY
 heif-enc -A $lossless --colour_primaries=12 --transfer_characteristic=13 heif-p3.png -o heif-p3.avif
+heif-enc -A -q 100 -p chroma=444 --matrix_coefficients=1 --colour_primaries=12 --transfer_characteristic=13 heif-p3.png -o heif-p3-yuv.avif
 heif-enc $lossless color-adobergb.png -o heif-adobergb.heic
 convert tiff-src.png \( +clone -fx 'i/w' -colorspace Gray \) -alpha off -compose CopyOpacity -composite png32:heif-alpha.png
 heif-enc -A $lossless heif-alpha.png -o heif-alpha.avif
