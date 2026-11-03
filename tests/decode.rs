@@ -1811,3 +1811,137 @@ fn svg_data_images_are_held_to_the_limits() {
     let doc = image("svg+xml", entities.as_bytes()) + "<use href='#i'/></svg>";
     assert_eq!(peak(&doc).0, Some("unsupported_variant"));
 }
+
+/// Our own optimised JPEG output (one scan per component), 4:2:0, at 53 × 37.
+fn separate_scans(source: &[u8]) -> Vec<u8> {
+    jpeg(53, 37, Jpeg::Rgb, source, |e| {
+        e.set_sampling_factor(SamplingFactor::F_2_2);
+        e.set_optimized_huffman_tables(true);
+    })
+}
+
+#[test]
+#[ignore = "known bug: IC18"]
+fn tiff_jpeg_strips_with_one_scan_per_component_decode() {
+    let source = gradient(53, 37, 3);
+    let strip = separate_scans(&source);
+    let short = |tag, n| (tag, 3, 1, V::N(n));
+    let ifd = [
+        short(256, 53),
+        short(257, 37),
+        (258, 3, 3, V::Blob(1)),
+        short(259, 7),
+        short(262, 6),
+        (273, 4, 1, V::Blob(0)),
+        short(277, 3),
+        short(278, 37),
+        (279, 4, 1, V::N(strip.len() as u32)),
+        (530, 3, 2, V::N(2 | 2 << 16)),
+    ];
+    let file = raw_tiff(42, &[&strip, &[8, 0, 8, 0, 8, 0]], &ifd, &[]);
+    let diff = mean_diff(u8s(&decode(&file).unwrap()), &source);
+    assert!(diff < 8.0, "{diff}");
+}
+
+#[test]
+#[ignore = "known bug: IC17"]
+fn svg_data_jpegs_with_one_scan_per_component_render() {
+    let source = gradient(53, 37, 3);
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' width='53' height='37'>
+        <image width='53' height='37' href='data:image/jpeg;base64,{}'/></svg>",
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            separate_scans(&source)
+        )
+    );
+    let (px, _) = svg(&doc, &Options::default()).unwrap();
+    let diff = mean_diff(&rgb(&px).concat(), &source);
+    assert!(diff < 8.0, "{diff}");
+}
+
+/// Whether every pixel is within 3 of `colour`.
+fn all_near(px: &Pixels, colour: [u8; 3]) -> bool {
+    rgb(px)
+        .iter()
+        .all(|p| p.iter().zip(colour).all(|(a, b)| a.abs_diff(b) <= 3))
+}
+
+#[test]
+#[ignore = "known bug: IC22"]
+fn jpeg_marked_rgb_by_adobe_is_rgb_whatever_its_component_ids() {
+    let colour = [80, 160, 220];
+    for ids in [[82, 71, 66], [1, 2, 3]] {
+        // Ycbcr stores the samples untransformed; one scan per component goes to jpeg-decoder.
+        let mut file = jpeg(53, 37, Jpeg::Ycbcr, &colour.repeat(53 * 37), |e| {
+            e.set_sampling_factor(SamplingFactor::F_2_1);
+            e.set_optimized_huffman_tables(true);
+            e.add_app_segment(14, b"Adobe\0\x64\0\0\0\0\0".to_vec())
+                .unwrap();
+        });
+        file.drain(2..20); // JFIF, which would say YCbCr.
+        for at in 0..file.len() - 1 {
+            match file[at..at + 2] {
+                [0xff, 0xc0] => (0..3).for_each(|i| file[at + 10 + 3 * i] = ids[i]),
+                [0xff, 0xda] => {
+                    let id = &mut file[at + 5];
+                    *id = ids[usize::from(*id)];
+                }
+                _ => {}
+            }
+        }
+        assert!(all_near(&decode(&file).unwrap(), colour), "ids {ids:?}");
+    }
+}
+
+#[test]
+#[ignore = "known bug: IC23"]
+fn jpeg_with_chroma_sampled_finer_than_luma_decodes() {
+    for name in ["jpeg-chroma-cb2x1.jpg", "jpeg-chroma-cr2x2.jpg"] {
+        assert!(
+            all_near(&decode(&fixture(name)).unwrap(), [80, 160, 220]),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "known bug: IC02"]
+fn an_end_marker_reached_through_a_cut_segment_does_not_end_a_jpeg() {
+    // Cut after a progressive JPEG's first scan, one byte short of a Huffman table's end, so
+    // the table's length runs into an APP15 that holds the end-marker bytes.
+    let whole = jpeg(64, 64, Jpeg::Rgb, &gradient(64, 64, 3), |e| {
+        e.set_progressive(true)
+    });
+    let mut scans = (0..whole.len() - 1).filter(|&i| whole[i..i + 2] == [0xff, 0xda]);
+    let mut cut = whole[..scans.nth(1).unwrap()].to_vec();
+    cut.extend([0xff, 0xc4, 0, 20, 0x10, 1]);
+    cut.extend([0; 15]);
+    cut.extend([0xff, 0xef, 0, 68]);
+    cut.extend([0; 64]);
+    cut.extend([0xff, 0xd9]);
+    assert_eq!(decode(&cut).unwrap_err().code, "corrupt_image");
+}
+
+#[test]
+#[ignore = "known bug: IC24"]
+fn jfif_makes_a_jpeg_ycbcr_whatever_adobe_says_as_in_libjpeg() {
+    let source = gradient(32, 32, 3);
+    let file = jpeg(32, 32, Jpeg::Rgb, &source, |e| {
+        e.add_app_segment(14, b"Adobe\0\x64\0\0\0\0\0".to_vec())
+            .unwrap();
+    });
+    let diff = mean_diff(u8s(&decode(&file).unwrap()), &source);
+    assert!(diff < 8.0, "{diff}");
+}
+
+#[test]
+#[ignore = "known bug: IC25"]
+fn a_grey_jpeg_ignores_its_sampling_factor() {
+    let source = gradient(32, 32, 1);
+    let mut file = jpeg(32, 32, Jpeg::Luma, &source, |_| {});
+    let sof = file.windows(2).position(|w| w == [0xff, 0xc0]).unwrap();
+    file[sof + 11] = 0x31;
+    let diff = mean_diff(u8s(&decode(&file).unwrap()), &source);
+    assert!(diff < 8.0, "{diff}");
+}

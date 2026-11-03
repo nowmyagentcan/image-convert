@@ -914,3 +914,52 @@ fn our_own_jpeg_output_reads_back_as_it_was_written() {
         }
     }
 }
+
+#[test]
+#[ignore = "known bug: IC19"]
+fn our_own_narrow_jpeg_output_reads_back_as_it_was_written() {
+    // From quality 90 the encoder writes 4:4:4 chroma, one scan per component.
+    for (width, height) in [(2, 9), (7, 10), (9, 9)] {
+        let source: Vec<u8> = (0..width * height)
+            .flat_map(|i| {
+                let v = 13 * (i % width) + 7 * (i / width);
+                [v, v + 53, v + 106].map(|c| (c % 256) as u8)
+            })
+            .collect();
+        let file = png(
+            width,
+            height,
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            &source,
+            |_| {},
+        );
+        for quality in [90, 100] {
+            let options = Options {
+                quality: Some(quality),
+                ..to(Format::Jpeg)
+            };
+            let back = srgb(&convert(&file, &options).bytes);
+            let diff = mean_diff(&back.data, &source);
+            assert!(diff < 4.0, "{width}×{height} quality {quality}: {diff}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "known bug: IC27"]
+fn jpeg_output_stays_within_what_libjpeg_opens() {
+    let width = 65_501;
+    let file = png(
+        width,
+        1,
+        png::ColorType::Grayscale,
+        png::BitDepth::Eight,
+        &vec![128; width as usize],
+        |_| {},
+    );
+    let kind = detect(&file, Path::new("input")).unwrap();
+    if let Ok(output) = render(decode(&file), kind, &to(Format::Jpeg)) {
+        assert!(decode(&output.bytes).width <= 65_500);
+    }
+}

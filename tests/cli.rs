@@ -992,3 +992,79 @@ fn a_gzip_that_inflates_too_far_gets_no_sizing_hint() {
         "{error}"
     );
 }
+
+#[test]
+#[ignore = "known bug: IC20"]
+fn a_run_killed_while_it_writes_leaves_no_partial_output() {
+    let dir = folder("killed");
+    // Noise, so the PNG takes a while to write.
+    let mut state = 1u32;
+    let rgb: Vec<u8> = (0..3000 * 2000 * 3)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let file = png(
+        3000,
+        2000,
+        png::ColorType::Rgb,
+        png::BitDepth::Eight,
+        &rgb,
+        |_| {},
+    );
+    fs::write(dir.join("noise.png"), file).unwrap();
+    let out = dir.join("out.png");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_image-convert"))
+        .args(["noise.png", "-o", "out.png"])
+        .current_dir(&dir)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    // Killed the moment the output's name appears.
+    while !out.exists() && child.try_wait().unwrap().is_none() {}
+    child.kill().unwrap();
+    child.wait().unwrap();
+    if let Ok(written) = fs::read(&out) {
+        assert!(
+            written.ends_with(b"IEND\xae\x42\x60\x82"),
+            "{} bytes",
+            written.len()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "known bug: IC26"]
+fn overwrite_leaves_other_kinds_of_file_and_a_files_mode_alone() {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    let dir = folder("node");
+    fs::write(dir.join("a.png"), small_png()).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(dir.join("pipe"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    let args = ["a.png", "--to", "png", "-o", "pipe", "--overwrite"];
+    assert_ne!(run(&dir, &args, None).code, 0);
+    assert!(
+        fs::metadata(dir.join("pipe"))
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
+    let private = dir.join("private.png");
+    fs::write(&private, b"old").unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        run(&dir, &["a.png", "-o", "private.png", "--overwrite"], None).code,
+        0
+    );
+    let mode = fs::metadata(&private).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
