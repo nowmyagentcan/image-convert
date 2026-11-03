@@ -16,9 +16,12 @@ pub fn decode(data: &[u8]) -> Result<(Pixels, (u32, u32, u8)), Error> {
     let (width, height) = (image.width(), image.height());
     check_size(width.into(), height.into(), "JPEG XL")?;
     let header = image.image_header();
-    let stored = (header.size.width, header.size.height);
     let metadata = &header.metadata;
-    let orientation = metadata.orientation as u8;
+    let stored = (
+        header.size.width,
+        header.size.height,
+        metadata.orientation as u8,
+    );
     let bits = metadata.bit_depth.bits_per_sample();
     let encoding = if metadata.grayscale() {
         EnumColourEncoding::gray_srgb(RenderingIntent::Perceptual)
@@ -74,5 +77,5 @@ pub fn decode(data: &[u8]) -> Result<(Pixels, (u32, u32, u8)), Error> {
             .into_iter()
             .collect(),
     };
-    Ok((px, (stored.0, stored.1, orientation)))
+    Ok((px, stored))
 }

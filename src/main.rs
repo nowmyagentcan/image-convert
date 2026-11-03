@@ -411,8 +411,6 @@ fn formats(json: bool, out: &mut Out<impl Write>) -> io::Result<()> {
     out.w.flush()
 }
 
-/// Reports an error that stops the run, as two lines on stderr or as JSON on stdout, and
-/// exits with its code.
 /// Parses `args` with `command`; a usage error is a JSON object when `--json` comes before any
 /// `--`, else clap's own text.
 fn parse<T: FromArgMatches>(command: clap::Command, args: &[OsString]) -> Result<T, ExitCode> {
@@ -431,6 +429,8 @@ fn parse<T: FromArgMatches>(command: clap::Command, args: &[OsString]) -> Result
     }
 }
 
+/// Reports an error that stops the run, as two lines on stderr or as JSON on stdout, and
+/// exits with its code.
 fn fail(e: &Error, json: bool) -> ExitCode {
     let _ = if json {
         writeln!(io::stdout(), "{}", e.to_json())
