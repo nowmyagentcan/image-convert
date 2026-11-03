@@ -889,3 +889,29 @@ fn lossy_heif_colour_is_converted_once() {
     let worst = worst_delta_e(&rgb, &p3_patches().1);
     assert!(worst <= 2.0, "ΔE2000 {worst}");
 }
+
+#[test]
+#[ignore = "known bug: IC15"]
+fn our_own_jpeg_output_reads_back_as_it_was_written() {
+    // Below quality 90 the encoder writes 4:2:0 chroma, one scan per component.
+    for (width, height) in [(64, 48), (53, 37)] {
+        let source = gradient(width, height, 3);
+        let file = png(
+            width,
+            height,
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            &source,
+            |_| {},
+        );
+        for quality in [75, 85, 89, 90] {
+            let options = Options {
+                quality: Some(quality),
+                ..to(Format::Jpeg)
+            };
+            let back = srgb(&convert(&file, &options).bytes);
+            let diff = mean_diff(&back.data, &source);
+            assert!(diff < 4.0, "{width}×{height} quality {quality}: {diff}");
+        }
+    }
+}

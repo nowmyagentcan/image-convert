@@ -1698,3 +1698,83 @@ fn jpeg_xl_orientation_is_reported_with_the_stored_size() {
         );
     }
 }
+
+#[test]
+#[ignore = "known bug: IC15"]
+fn jpeg_with_one_scan_per_component_decodes() {
+    // jpeg-encoder writes each component's scan separately once its Huffman tables are optimised.
+    let source = gradient(53, 37, 3);
+    for factor in [
+        SamplingFactor::F_2_1,
+        SamplingFactor::F_1_2,
+        SamplingFactor::F_2_2,
+        SamplingFactor::F_4_1,
+    ] {
+        let file = jpeg(53, 37, Jpeg::Rgb, &source, |e| {
+            e.set_sampling_factor(factor);
+            e.set_optimized_huffman_tables(true);
+        });
+        assert_eq!(file.windows(2).filter(|w| w == &[0xff, 0xda]).count(), 3);
+        let diff = mean_diff(u8s(&decode(&file).unwrap()), &source);
+        assert!(diff < 8.0, "{factor:?}: {diff}");
+    }
+}
+
+#[test]
+#[ignore = "known bug: IC02"]
+fn a_jpeg_cut_inside_its_scans_is_corrupt_even_with_an_end_marker() {
+    let [baseline, progressive] = [false, true].map(|progressive| {
+        jpeg(64, 64, Jpeg::Rgb, &gradient(64, 64, 3), |e| {
+            e.set_progressive(progressive)
+        })
+    });
+    for whole in [&baseline, &progressive] {
+        let mut cut = whole[..whole.len() * 3 / 4].to_vec();
+        cut.extend([0xff, 0xd9]);
+        assert_eq!(decode(&cut).unwrap_err().code, "corrupt_image");
+    }
+    // Cut after the first of a progressive JPEG's scans; the end-marker bytes sit in an APP15.
+    let whole = progressive;
+    let mut scans = (0..whole.len() - 1).filter(|&i| whole[i..i + 2] == [0xff, 0xda]);
+    let mut cut = whole[..scans.nth(1).unwrap()].to_vec();
+    cut.extend([0xff, 0xef, 0, 4, 0xff, 0xd9]);
+    assert_eq!(decode(&cut).unwrap_err().code, "corrupt_image");
+}
+
+#[test]
+#[ignore = "known bug: IC16"]
+fn svg_data_images_are_held_to_the_limits() {
+    let image = |kind: &str, data: &[u8]| {
+        format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><defs>
+            <image id='i' width='8' height='8' href='data:image/{kind};base64,{}'/></defs>",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data)
+        )
+    };
+    // The bytes the render allocates beyond what is live when it starts.
+    let peak = |doc: &str| {
+        LIVE.with(|live| PEAK.with(|peak| peak.set(live.get())));
+        let start = LIVE.with(Cell::get);
+        let result = svg(doc, &Options::default());
+        (result.err().map(|e| e.code), PEAK.with(Cell::get) - start)
+    };
+    // 65,536 px wide, and 14,200² = 201.6 MP: tiny as 1-bit PNGs.
+    for (width, height) in [(65_536u32, 1u32), (14_200, 14_200)] {
+        let rows = vec![0; width.div_ceil(8) as usize * height as usize];
+        let data = png(width, height, Png::Grayscale, BitDepth::One, &rows, |_| {});
+        let doc = image("png", &data) + "<use href='#i'/></svg>";
+        let (code, bytes) = peak(&doc);
+        assert_eq!(code, Some("image_too_large"), "{width}×{height}");
+        assert!(
+            bytes < 64 << 20,
+            "{width}×{height}: allocated {bytes} bytes"
+        );
+    }
+    // SVG images nested five deep, each used ten times: 10⁵ copies from a 6 KB file.
+    let mut doc = "<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'/>".to_string();
+    for _ in 0..5 {
+        doc = image("svg+xml", doc.as_bytes()) + &"<use href='#i'/>".repeat(10) + "</svg>";
+    }
+    let (_, bytes) = peak(&doc);
+    assert!(bytes < 64 << 20, "nested: allocated {bytes} bytes");
+}
