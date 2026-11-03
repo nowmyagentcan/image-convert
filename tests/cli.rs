@@ -902,11 +902,14 @@ fn runs_at_the_same_time_never_replace_each_others_outputs() {
     let dir = folder("together");
     let colour = |i: usize| [i as u8 * 10, 255 - i as u8 * 10, 7];
     for i in 0..24 {
-        let mut rgb = gradient(512, 512, 3);
+        // Noise, so each output takes a while to write.
+        let mut rgb: Vec<u8> = (0..3 << 20)
+            .map(|n: u32| (n.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
         rgb[..3].copy_from_slice(&colour(i));
         let file = png(
-            512,
-            512,
+            1024,
+            1024,
             png::ColorType::Rgb,
             png::BitDepth::Eight,
             &rgb,
@@ -926,20 +929,25 @@ fn runs_at_the_same_time_never_replace_each_others_outputs() {
                     .unwrap()
             })
             .collect();
-        let outputs = children
+        children
             .into_iter()
-            .map(|c| c.wait_with_output().unwrap().stdout);
-        outputs
+            .map(|c| c.wait_with_output().unwrap().stdout)
             .map(|o| serde_json::from_slice::<Value>(&o).unwrap()["files"][0]["output"].clone())
             .collect::<Vec<_>>()
     };
-    for (i, output) in all("out/").iter().enumerate() {
-        let written = image::open(dir.join(output.as_str().unwrap())).unwrap();
-        assert_eq!(written.to_rgb8().get_pixel(0, 0).0, colour(i), "{output}");
+    // A few rounds, since a lost race needs two runs to meet between the check and the write.
+    for round in 0..3 {
+        for (i, output) in all(&format!("out{round}/")).iter().enumerate() {
+            let written = image::open(dir.join(output.as_str().unwrap())).unwrap();
+            assert_eq!(written.to_rgb8().get_pixel(0, 0).0, colour(i), "{output}");
+        }
+        // Without --overwrite, one run writes `-o FILE` and the others find it there.
+        let written = all(&format!("{round}.png"))
+            .iter()
+            .filter(|o| !o.is_null())
+            .count();
+        assert_eq!(written, 1);
     }
-    // Without --overwrite, one run writes `-o FILE` and the others find it there.
-    let written = all("one.png").iter().filter(|o| !o.is_null()).count();
-    assert_eq!(written, 1);
 }
 
 #[test]

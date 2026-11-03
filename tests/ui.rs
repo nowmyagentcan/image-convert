@@ -543,13 +543,6 @@ fn a_double_click_starts_the_page() {
 #[ignore = "known bug: IC08"]
 fn a_control_byte_in_any_header_is_refused() {
     let server = Server::start(&["--no-open"]);
-    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
-    let head = format!(
-        "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Other: a\x01b\r\n\r\n",
-        server.port
-    );
-    stream.write_all(head.as_bytes()).unwrap();
-    let mut response = Vec::new();
-    let _ = stream.read_to_end(&mut response);
-    assert_eq!(response.get(9..12), Some(&b"400"[..]));
+    let head = "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Other: a\x01b";
+    assert_eq!(server.send(head, b"").0, 400);
 }
