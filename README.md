@@ -101,13 +101,13 @@ Invalid arguments and files that can't be converted with `view_image` return `is
 Known limitations in v0.1.0:
 
 - HEIC through Windows was tested only for its missing-decoder message: no test machine had the HEVC extension. AVIF through Windows was tested on Windows 11 with the AV1 extension.
-- JPEGs with 4x2, 2x4 or 1x4 chroma sampling are refused (`unsupported_variant`) until the JPEG decoder handles them correctly.
+- HDR HEIC and AVIF (PQ or HLG) come out differently by system: Windows and macOS tone-map them in the system's decoder, while Linux maps reference white to sRGB white without tone mapping and warns `hdr_clipped`, so one file can look different on each.
 - A 12 MP JPEG XL needs about 300 MB of memory while it decodes, and a 12 MP AVIF through Windows about 380 MB (other photos of that size need under 200 MB).
 - A damaged AVIF can make the system's AV1 decoder print its own messages to stderr; stdout and `--json` are unaffected.
 
 ## How it works
 
-Each file is identified by its bytes, decoded to pixels ([zune-jpeg](https://github.com/etemesi254/zune-image), [image](https://github.com/image-rs/image), [tiff](https://github.com/image-rs/image-tiff), [jxl-oxide](https://github.com/tirr-c/jxl-oxide), [resvg](https://github.com/linebender/resvg) with the Noto Sans font, or the system's decoder: Windows Imaging Component and GDI+, macOS ImageIO, Linux libheif), turned to sRGB by [moxcms](https://github.com/awxkee/moxcms), resized by [fast_image_resize](https://github.com/Cykooz/fast_image_resize) and made upright.
+Each file is identified by its bytes, decoded to pixels ([zune-jpeg](https://github.com/etemesi254/zune-image) and [jpeg-decoder](https://github.com/image-rs/jpeg-decoder), [image](https://github.com/image-rs/image), [tiff](https://github.com/image-rs/image-tiff), [jxl-oxide](https://github.com/tirr-c/jxl-oxide), [resvg](https://github.com/linebender/resvg) with the Noto Sans font, or the system's decoder: Windows Imaging Component and GDI+, macOS ImageIO, Linux libheif), turned to sRGB by [moxcms](https://github.com/awxkee/moxcms), resized by [fast_image_resize](https://github.com/Cykooz/fast_image_resize) and made upright.
 It is written as PNG by [image](https://github.com/image-rs/image), JPEG by [jpeg-encoder](https://github.com/vstroebel/jpeg-encoder) or WebP by [libwebp](https://chromium.googlesource.com/webm/libwebp). This software is based in part on the work of the Independent JPEG Group.
 The CLI uses [clap](https://github.com/clap-rs/clap) and the MCP server the [official Rust SDK](https://github.com/modelcontextprotocol/rust-sdk).
 
