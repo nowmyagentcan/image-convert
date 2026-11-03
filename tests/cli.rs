@@ -897,7 +897,6 @@ fn interactive_mode_converts_dropped_paths_in_a_terminal() {
 
 /// Runs started together into one folder, each input coloured differently under the same name.
 #[test]
-#[ignore = "known bug: IC01"]
 fn runs_at_the_same_time_never_replace_each_others_outputs() {
     let dir = folder("together");
     let colour = |i: usize| [i as u8 * 10, 255 - i as u8 * 10, 7];

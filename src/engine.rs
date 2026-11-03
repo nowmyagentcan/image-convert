@@ -244,11 +244,19 @@ pub fn convert_input(
         return Ok(file);
     };
     let start = Instant::now();
-    match input.output(target, file.extension(), overwrite) {
-        Ok(Some(path)) => match write(&path, &bytes) {
-            Ok(()) => file.output = Some(path.to_string_lossy().into_owned()),
-            Err(e) => file.fail(e),
-        },
+    let named = !matches!(target, Target::File(_));
+    let written = loop {
+        match input.output(target, file.extension(), overwrite) {
+            // Another run took this name since it was picked; pick again.
+            Ok(Some(path)) => match write(&path, &bytes, overwrite && !named) {
+                Err(e) if named && e.code == "output_exists" => continue,
+                written => break written.map(|()| Some(path)),
+            },
+            other => break other,
+        }
+    };
+    match written {
+        Ok(Some(path)) => file.output = Some(path.to_string_lossy().into_owned()),
         Ok(None) => {
             let mut stdout = io::stdout().lock();
             stdout.write_all(&bytes)?;
@@ -263,7 +271,9 @@ pub fn convert_input(
 
 /// Writes `bytes` to `path` through a temporary file in the same folder that is then renamed
 /// into place, so a failed write never leaves a partial output; makes the folder as needed.
-pub fn write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+/// Unless `replace`, the name is claimed first (`output_exists` if anything is there), so runs
+/// at the same time never write over each other.
+pub fn write(path: &Path, bytes: &[u8], replace: bool) -> Result<(), Error> {
     static COUNT: AtomicU32 = AtomicU32::new(0);
     let failed = |e| Error::write_failed(&path.to_string_lossy(), e);
     let dir = match path.parent() {
@@ -271,6 +281,14 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
         _ => Path::new("."),
     };
     fs::create_dir_all(dir).map_err(failed)?;
+    if !replace {
+        match File::create_new(path) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(Error::output_exists(&path.to_string_lossy()));
+            }
+            claimed => drop(claimed.map_err(failed)?),
+        }
+    }
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
     let temp = dir.join(format!(".image-convert-{}-{n}.tmp", std::process::id()));
     let written = File::create_new(&temp)
@@ -278,6 +296,9 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
         .and_then(|()| fs::rename(&temp, path));
     if written.is_err() {
         let _ = fs::remove_file(&temp);
+        if !replace {
+            let _ = fs::remove_file(path);
+        }
     }
     written.map_err(failed)
 }
@@ -452,11 +473,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("image-convert-write-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("sub/out.png");
-        write(&path, b"one").unwrap();
-        write(&path, b"two").unwrap();
+        write(&path, b"one", false).unwrap();
+        assert_eq!(
+            write(&path, b"two", false).unwrap_err().code,
+            "output_exists"
+        );
+        write(&path, b"two", true).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"two");
         let blocked = dir.join("sub/out.png/inner.png");
-        assert_eq!(write(&blocked, b"x").unwrap_err().code, "write_failed");
+        for replace in [false, true] {
+            assert_eq!(
+                write(&blocked, b"x", replace).unwrap_err().code,
+                "write_failed"
+            );
+        }
         let left: Vec<_> = fs::read_dir(dir.join("sub")).unwrap().collect();
         assert_eq!(left.len(), 1);
         fs::remove_dir_all(dir).unwrap();
