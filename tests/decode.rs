@@ -1660,7 +1660,6 @@ fn heif_state_matches_the_installed_packages() {
 }
 
 #[test]
-#[ignore = "known bug: IC02"]
 fn a_jpeg_cut_inside_its_scans_is_corrupt() {
     for progressive in [false, true] {
         let whole = jpeg(64, 64, Jpeg::Rgb, &gradient(64, 64, 3), |e| {

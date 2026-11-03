@@ -22,6 +22,8 @@ pub(crate) struct Frame {
     sampling: (u8, u8),
     /// The Adobe APP14 colour transform, when that segment is present.
     adobe: Option<u8>,
+    /// Where the first scan's marker is.
+    scan: usize,
 }
 
 /// Decodes the first image of a JPEG (MPO and Ultra HDR files hold more): grey, RGB or CMYK.
@@ -54,6 +56,11 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         ));
     }
     check_size(frame.width.into(), frame.height.into(), "JPEG")?;
+    // zune-jpeg fills a cut-off image with grey; the scans of a whole one end at an EOI marker,
+    // which coded data never holds.
+    if !data[frame.scan..].windows(2).any(|w| w == [0xff, 0xd9]) {
+        return Err(Error::corrupt("JPEG", "its image data is cut short"));
+    }
 
     // Four components come out raw, as zune-jpeg reads them (YCCK only after Adobe transform 2).
     let (layout, colorspace) = match (frame.components, frame.adobe) {
@@ -132,6 +139,7 @@ pub(crate) fn frame(data: &[u8]) -> Result<Frame, Error> {
                     components,
                     sampling,
                     adobe: None,
+                    scan: 0,
                 });
             }
             0xf7 => return Err(Error::unsupported_variant("JPEG", "JPEG-LS")),
@@ -141,7 +149,11 @@ pub(crate) fn frame(data: &[u8]) -> Result<Frame, Error> {
         at += 2 + usize::from(word(at + 2)?);
     }
     let frame = found.ok_or_else(|| Error::corrupt("JPEG", "it has no frame header"))?;
-    Ok(Frame { adobe, ..frame })
+    Ok(Frame {
+        adobe,
+        scan: at,
+        ..frame
+    })
 }
 
 /// YCCK as zune-jpeg gives it (Y, Cb, Cr, inverted K) to CMYK in Adobe's inverted form.
@@ -193,6 +205,7 @@ mod tests {
             components: 1,
             sampling: (1, 1),
             adobe: None,
+            scan: grey.windows(2).position(|w| w == [0xff, 0xda]).unwrap(),
         };
         assert_eq!(frame, expected);
         let cmyk = jpeg(1, 1, ColorType::CmykAsYcck, &[0; 4]);
