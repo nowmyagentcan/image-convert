@@ -1722,20 +1722,24 @@ fn jpeg_xl_orientation_is_reported_with_the_stored_size() {
 #[test]
 fn jpeg_with_one_scan_per_component_decodes() {
     // jpeg-encoder writes each component's scan separately once its Huffman tables are optimised.
-    let source = gradient(53, 37, 3);
-    for factor in [
-        SamplingFactor::F_2_1,
-        SamplingFactor::F_1_2,
-        SamplingFactor::F_2_2,
-        SamplingFactor::F_4_1,
-    ] {
-        let file = jpeg(53, 37, Jpeg::Rgb, &source, |e| {
-            e.set_sampling_factor(factor);
-            e.set_optimized_huffman_tables(true);
-        });
-        assert_eq!(file.windows(2).filter(|w| w == &[0xff, 0xda]).count(), 3);
-        let diff = mean_diff(u8s(&decode(&file).unwrap()), &source);
-        assert!(diff < 8.0, "{factor:?}: {diff}");
+    for (color, channels) in [(Jpeg::Rgb, 3), (Jpeg::Cmyk, 4), (Jpeg::CmykAsYcck, 4)] {
+        let source = gradient(53, 37, channels);
+        for factor in [
+            SamplingFactor::F_1_1,
+            SamplingFactor::F_2_1,
+            SamplingFactor::F_1_2,
+            SamplingFactor::F_2_2,
+            SamplingFactor::F_4_1,
+        ] {
+            let file = jpeg(53, 37, color, &source, |e| {
+                e.set_sampling_factor(factor);
+                e.set_optimized_huffman_tables(true);
+            });
+            let scans = file.windows(2).filter(|w| w == &[0xff, 0xda]).count();
+            assert_eq!(scans, channels);
+            let diff = mean_diff(u8s(&decode(&file).unwrap()), &source);
+            assert!(diff < 8.0, "{color:?} {factor:?}: {diff}");
+        }
     }
 }
 

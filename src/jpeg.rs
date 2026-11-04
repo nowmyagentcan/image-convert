@@ -57,12 +57,12 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         return Err(Error::corrupt("JPEG", "its image data is cut short"));
     }
 
-    // zune-jpeg 0.5.15 decodes these subsampled layouts to wrong colours (fixed in its 0.5.16
-    // pre-releases): one scan per component, 4×2, 2×4 and 1×4 sampling, and CMYK.
+    // zune-jpeg 0.5.15 decodes these layouts to wrong colours (fixed in its 0.5.16 pre-releases):
+    // one scan per component, and subsampled 4×2, 2×4, 1×4 or CMYK.
     let subsampled = frame.components > 1 && frame.sampling != (1, 1);
     let odd = !matches!(frame.sampling, (2, 1) | (1, 2) | (2, 2) | (4, 1));
     let separate = matches!(frame.marker, 0xc0 | 0xc1) && frame.scan_components < frame.components;
-    let (layout, samples, exif, icc) = if subsampled && (odd || separate || frame.components == 4) {
+    let (layout, samples, exif, icc) = if separate || subsampled && (odd || frame.components == 4) {
         other(data, &frame)?
     } else {
         zune(data, &frame)?

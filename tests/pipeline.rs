@@ -916,7 +916,6 @@ fn our_own_jpeg_output_reads_back_as_it_was_written() {
 }
 
 #[test]
-#[ignore = "known bug: IC19"]
 fn our_own_narrow_jpeg_output_reads_back_as_it_was_written() {
     // From quality 90 the encoder writes 4:4:4 chroma, one scan per component.
     for (width, height) in [(2, 9), (7, 10), (9, 9)] {
