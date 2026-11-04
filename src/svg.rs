@@ -10,9 +10,11 @@ use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::fontdb::Source;
 use resvg::usvg::{ImageHrefResolver, ImageKind, Options as Parse, Tree};
 
+use crate::color::to_srgb;
 use crate::detect::{Kind, detect, find};
+use crate::encode::encode;
 use crate::error::{Error, Warning};
-use crate::{Layout, Options, Pixels, Samples, resize};
+use crate::{Format, Layout, Options, Pixels, Samples, jpeg, resize};
 
 static NOTO_SANS: &[u8] = include_bytes!("../assets/fonts/NotoSans-Regular.ttf");
 const MAX_INFLATED: u64 = 64 << 20;
@@ -122,7 +124,8 @@ fn refuse(data: &[u8]) -> Result<(), Error> {
 }
 
 /// A data image for usvg, held to the limits with every image resolved before it; a nested SVG
-/// resolves its own images through here again. Anything else is skipped, as usvg does.
+/// resolves its own images through here again, and a JPEG resvg would misread is passed on as
+/// PNG. Anything else is skipped, as usvg does.
 fn embed(
     data: Arc<Vec<u8>>,
     parse: &Parse,
@@ -131,12 +134,13 @@ fn embed(
     if budget.lock().unwrap().error.is_some() {
         return Ok(None);
     }
-    let raster = match detect(&data, Path::new("")) {
-        Ok(Kind::Png) => ImageKind::PNG,
-        Ok(Kind::Jpeg) => ImageKind::JPEG,
-        Ok(Kind::Gif) => ImageKind::GIF,
-        Ok(Kind::Webp) => ImageKind::WEBP,
-        Ok(kind @ (Kind::Svg | Kind::Gzip)) => {
+    let kind = detect(&data, Path::new("")).ok();
+    let raster = match kind {
+        Some(Kind::Png) => ImageKind::PNG,
+        Some(Kind::Jpeg) => ImageKind::JPEG,
+        Some(Kind::Gif) => ImageKind::GIF,
+        Some(Kind::Webp) => ImageKind::WEBP,
+        Some(kind @ (Kind::Svg | Kind::Gzip)) => {
             let inflated = match kind {
                 Kind::Svg => None,
                 _ => match ungzip(&data)? {
@@ -167,6 +171,11 @@ fn embed(
     if width > 65535 || height > 65535 || b.pixels > 200_000_000 {
         let what = "add up to more than 200 megapixels, or one is over 65,535 pixels a side";
         return Err(Error::embeds_too_much(what));
+    }
+    if kind == Some(Kind::Jpeg) && jpeg::misread_by_zune(&data) {
+        let (image, _) = to_srgb(&mut jpeg::decode(&data)?);
+        let png = encode(&image, Format::Png, 0, None);
+        return Ok(Some(ImageKind::PNG(Arc::new(png))));
     }
     Ok(Some(raster(data)))
 }

@@ -7,7 +7,7 @@ use ::tiff::decoder::{Decoder, DecodingResult, Limits};
 
 use crate::color::Colour;
 use crate::error::{Error, Warning};
-use crate::jpeg::ycc_to_rgb;
+use crate::jpeg::{self, ycc_to_rgb};
 use crate::{Layout, Pixels, Samples, check_size};
 
 /// A TIFF header's byte order and the file it lies in.
@@ -343,7 +343,11 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         .with_limits(limits);
     let (w, h) = (page.width as usize, page.height as usize);
     let channels = page.colours + usize::from(page.extra);
-    let samples = match decoder.read_image().map_err(failed)? {
+    let decoded = match misread_jpeg_strips(data, ifd0)? {
+        Some(samples) => DecodingResult::U8(samples),
+        None => decoder.read_image().map_err(failed)?,
+    };
+    let samples = match decoded {
         DecodingResult::U8(s) if page.bits == 1 && s.len() >= w.div_ceil(8) * h => {
             let row = w.div_ceil(8);
             let bit = |x: usize, y: usize| s[y * row + x / 8] >> (7 - x % 8) & 1;
@@ -395,6 +399,32 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
             .into_iter()
             .collect(),
     })
+}
+
+/// The samples of JPEG strips when the tiff crate's zune-jpeg would misread one of them.
+fn misread_jpeg_strips(data: &[u8], ifd: &Ifd) -> Result<Option<Vec<u8>>, Error> {
+    if ifd.value(259) != Some(7) {
+        return Ok(None);
+    }
+    let strip = |(at, len)| data.get(at as usize..)?.get(..len as usize);
+    let strips: Option<Vec<_>> = ifd
+        .values(273)
+        .into_iter()
+        .zip(ifd.values(279))
+        .map(strip)
+        .collect();
+    let Some(strips) = strips.filter(|s| s.iter().any(|s| jpeg::misread_by_zune(s))) else {
+        return Ok(None);
+    };
+    // JPEGTables is a JPEG of tables alone, joined to a strip without its EOI and the strip's SOI.
+    let tables = ifd.bytes(347).and_then(|t| t.strip_suffix(b"\xff\xd9"));
+    let start = tables.unwrap_or(&[0xff, 0xd8]);
+    let mut samples = Vec::new();
+    for strip in strips {
+        let whole = [start, strip.get(2..).unwrap_or_default()].concat();
+        samples.extend(jpeg::untransformed(&whole)?);
+    }
+    Ok(Some(samples))
 }
 
 /// Each pixel's samples without the last one.

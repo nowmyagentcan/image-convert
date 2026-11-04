@@ -54,6 +54,28 @@ impl Frame {
     }
 }
 
+/// Whether a JPEG is one zune-jpeg, which resvg and the tiff crate read JPEG with, gets wrong.
+pub(crate) fn misread_by_zune(data: &[u8]) -> bool {
+    frame(data).is_ok_and(|frame| frame.misread_by_zune())
+}
+
+/// The samples of a JPEG inside a TIFF, which says itself what colour they are. The transforms
+/// to RGB and CMYK leave them as they are, CMYK inverted; `ColorTransform::None` panics in 0.3.2.
+pub(crate) fn untransformed(data: &[u8]) -> Result<Vec<u8>, Error> {
+    let cmyk = frame(data)?.components == 4;
+    let mut decoder = jpeg_decoder::Decoder::new(data);
+    decoder.set_color_transform(if cmyk {
+        ColorTransform::CMYK
+    } else {
+        ColorTransform::RGB
+    });
+    let mut samples = decoder.decode().map_err(|e| Error::corrupt("JPEG", e))?;
+    if cmyk {
+        samples.iter_mut().for_each(|v| *v = 255 - *v);
+    }
+    Ok(samples)
+}
+
 /// Decodes the first image of a JPEG (MPO and Ultra HDR files hold more): grey, RGB or CMYK.
 pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
     let frame = frame(data)?;

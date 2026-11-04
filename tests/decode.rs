@@ -1825,30 +1825,38 @@ fn separate_scans(source: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "known bug: IC18"]
 fn tiff_jpeg_strips_with_one_scan_per_component_decode() {
     let source = gradient(53, 37, 3);
-    let strip = separate_scans(&source);
+    let whole = separate_scans(&source);
+    // The same strip with its first quantisation table moved to JPEGTables.
+    let at = whole.windows(2).position(|w| w == [0xff, 0xdb]).unwrap();
+    let end = at + 2 + usize::from(u16::from_be_bytes([whole[at + 2], whole[at + 3]]));
+    let apart = [&whole[..at], &whole[end..]].concat();
+    let tables = [b"\xff\xd8", &whole[at..end], b"\xff\xd9"].concat();
     let short = |tag, n| (tag, 3, 1, V::N(n));
-    let ifd = [
-        short(256, 53),
-        short(257, 37),
-        (258, 3, 3, V::Blob(1)),
-        short(259, 7),
-        short(262, 6),
-        (273, 4, 1, V::Blob(0)),
-        short(277, 3),
-        short(278, 37),
-        (279, 4, 1, V::N(strip.len() as u32)),
-        (530, 3, 2, V::N(2 | 2 << 16)),
-    ];
-    let file = raw_tiff(42, &[&strip, &[8, 0, 8, 0, 8, 0]], &ifd, &[]);
-    let diff = mean_diff(u8s(&decode(&file).unwrap()), &source);
-    assert!(diff < 8.0, "{diff}");
+    for (strip, tables) in [(&whole, &[][..]), (&apart, &tables[..])] {
+        let mut ifd = vec![
+            short(256, 53),
+            short(257, 37),
+            (258, 3, 3, V::Blob(1)),
+            short(259, 7),
+            short(262, 6),
+            (273, 4, 1, V::Blob(0)),
+            short(277, 3),
+            short(278, 37),
+            (279, 4, 1, V::N(strip.len() as u32)),
+        ];
+        if !tables.is_empty() {
+            ifd.push((347, 7, tables.len() as u32, V::Blob(2)));
+        }
+        ifd.push((530, 3, 2, V::N(2 | 2 << 16)));
+        let file = raw_tiff(42, &[strip, &[8, 0, 8, 0, 8, 0], tables], &ifd, &[]);
+        let diff = mean_diff(u8s(&decode(&file).unwrap()), &source);
+        assert!(diff < 8.0, "{diff}");
+    }
 }
 
 #[test]
-#[ignore = "known bug: IC17"]
 fn svg_data_jpegs_with_one_scan_per_component_render() {
     let source = gradient(53, 37, 3);
     let doc = format!(
