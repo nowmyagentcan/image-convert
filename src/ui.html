@@ -207,6 +207,7 @@ form.addEventListener("submit", async ev => {
   out.replaceChildren(status);
   for (const [i, file] of chosen.entries()) {
     const wait = setTimeout(() => {
+      if (run !== latest) return;
       out.setAttribute("aria-busy", "true");
       status.innerHTML = '<div class="bar" role="progressbar" aria-label="Converting"></div>';
       status.append(el("p", "muted", shown(`Converting ${i + 1} of ${chosen.length} · ${file.name}`)));

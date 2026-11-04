@@ -546,13 +546,33 @@ fn a_control_byte_in_any_header_is_refused() {
     assert_eq!(server.send(head, b"").0, 400);
 }
 
+/// Whether Node can run the page's script; a run that doesn't require it skips without.
+fn has_node() -> bool {
+    let found = Command::new("node").arg("--version").output().is_ok();
+    if !found {
+        assert!(!required("node"), "node isn't on PATH");
+        eprintln!("skipped: the page's script needs node on PATH");
+    }
+    found
+}
+
+/// What `script` prints in Node.
+fn node(script: &str) -> Vec<u8> {
+    let out = Command::new("node").args(["-e", script]).output();
+    let out = out.expect("Node runs the page's script");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
 /// The page's own option filter, run in Node: every value that differs from the form's
 /// default is sent, whichever field it is in.
 #[test]
 fn the_page_sends_each_option_that_differs_from_its_default() {
-    if Command::new("node").arg("--version").output().is_err() {
-        assert!(!required("node"), "node isn't on PATH");
-        eprintln!("skipped: the page's script needs node on PATH");
+    if !has_node() {
         return;
     }
     let line = |start: &str| {
@@ -565,14 +585,7 @@ fn the_page_sends_each_option_that_differs_from_its_default() {
             line("const DEFAULTS"),
             line("function sent(")
         );
-        let out = Command::new("node").args(["-e", &script]).output();
-        let out = out.expect("Node runs the page's script");
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+        serde_json::from_slice::<Value>(&node(&script)).unwrap()
     };
     let defaults = r#"{ to: "auto", fit: "none", max_side: 0, max_bytes: 0, quality: 85, background: "white", keep_exif: false }"#;
     assert_eq!(sent(defaults), json!({}));
@@ -581,4 +594,38 @@ fn the_page_sends_each_option_that_differs_from_its_default() {
         sent(changed),
         json!({"to": "png", "fit": "vision", "max_side": 85, "max_bytes": 85000, "quality": 84, "keep_exif": true})
     );
+}
+
+/// The page's whole script in Node over a stand-in DOM: a run overtaken by a newer one, its
+/// progress timer firing after that one finished, leaves the results no longer busy.
+#[test]
+fn a_run_overtaken_by_a_newer_one_leaves_the_results_idle() {
+    if !has_node() {
+        return;
+    }
+    let page = PAGE.split_once("<script>").unwrap().1;
+    let page = page.split_once("</script>").unwrap().0;
+    let script = format!(
+        r#"(async () => {{
+          const fake = () => ({{ attrs: {{}}, value: "", classList: {{}}, dataset: {{}}, on: {{}},
+            setAttribute(k, v) {{ this.attrs[k] = v; }}, removeAttribute(k) {{ delete this.attrs[k]; }},
+            replaceChildren() {{}}, append() {{}}, addEventListener(t, f) {{ this.on[t] = f; }} }});
+          const found = {{}}, navigator = {{ userAgent: "" }};
+          const document = {{ querySelector: s => found[s] ??= fake(), createElement: fake, addEventListener() {{}} }};
+          {page}
+          const held = [];
+          globalThis.fetch = () => new Promise(done => held.push(done));
+          const refused = {{ ok: false, json: async () => ({{ input: "a.png", error: {{ message: "No." }} }}) }};
+          const submit = () => form.on.submit({{ preventDefault() {{}} }});
+          chosen = [{{ name: "a.png", size: 1 }}];
+          const first = submit(), second = submit();
+          held[1](refused);
+          await second;
+          await new Promise(done => setTimeout(done, 200));
+          held[0](refused);
+          await first;
+          console.log(JSON.stringify(out.attrs));
+        }})()"#
+    );
+    assert_eq!(node(&script), b"{}\n");
 }
