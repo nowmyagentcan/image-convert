@@ -1037,7 +1037,6 @@ fn a_run_killed_while_it_writes_leaves_no_partial_output() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "known bug: IC26"]
 fn overwrite_leaves_other_kinds_of_file_and_a_files_mode_alone() {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     let dir = folder("node");

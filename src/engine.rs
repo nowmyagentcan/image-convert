@@ -275,7 +275,8 @@ pub fn convert_input(
 
 /// Writes `bytes` to a temporary file in `path`'s folder, made as needed, then moves it into
 /// place, so the name never shows a partial output. Unless `replace`, the name must be free
-/// (`output_exists` if not), so runs at the same time never write over each other.
+/// (`output_exists` if not), so runs at the same time never write over each other; if `replace`,
+/// only a regular file is replaced, and it keeps its permissions.
 pub fn write(path: &Path, bytes: &[u8], replace: bool) -> Result<(), Error> {
     static COUNT: AtomicU32 = AtomicU32::new(0);
     let failed = |e| Error::write_failed(&path.to_string_lossy(), e);
@@ -284,10 +285,21 @@ pub fn write(path: &Path, bytes: &[u8], replace: bool) -> Result<(), Error> {
         _ => Path::new("."),
     };
     fs::create_dir_all(dir).map_err(failed)?;
+    let old = fs::metadata(path).ok().filter(|_| replace);
+    if old.as_ref().is_some_and(|m| !m.is_file()) {
+        return Err(failed(io::Error::other("it isn't a regular file")));
+    }
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
     let temp = dir.join(format!(".image-convert-{}-{n}.tmp", std::process::id()));
     let written = File::create_new(&temp)
-        .and_then(|mut f| f.write_all(bytes))
+        .and_then(|mut f| {
+            // Windows' only permission is read-only, and a read-only file can't be replaced.
+            #[cfg(unix)]
+            if let Some(old) = &old {
+                f.set_permissions(old.permissions())?;
+            }
+            f.write_all(bytes)
+        })
         .map_err(failed)
         .and_then(|()| match replace {
             true => fs::rename(&temp, path).map_err(failed),
