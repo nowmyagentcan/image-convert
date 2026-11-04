@@ -994,7 +994,6 @@ fn a_gzip_that_inflates_too_far_gets_no_sizing_hint() {
 }
 
 #[test]
-#[ignore = "known bug: IC20"]
 fn a_run_killed_while_it_writes_leaves_no_partial_output() {
     let dir = folder("killed");
     // Noise, so the PNG takes a while to write.

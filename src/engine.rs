@@ -273,10 +273,9 @@ pub fn convert_input(
     Ok(file)
 }
 
-/// Writes `bytes` to `path` through a temporary file in the same folder that is then renamed
-/// into place, so a failed write never leaves a partial output; makes the folder as needed.
-/// Unless `replace`, the name is claimed first (`output_exists` if anything is there), so runs
-/// at the same time never write over each other.
+/// Writes `bytes` to a temporary file in `path`'s folder, made as needed, then moves it into
+/// place, so the name never shows a partial output. Unless `replace`, the name must be free
+/// (`output_exists` if not), so runs at the same time never write over each other.
 pub fn write(path: &Path, bytes: &[u8], replace: bool) -> Result<(), Error> {
     static COUNT: AtomicU32 = AtomicU32::new(0);
     let failed = |e| Error::write_failed(&path.to_string_lossy(), e);
@@ -285,26 +284,37 @@ pub fn write(path: &Path, bytes: &[u8], replace: bool) -> Result<(), Error> {
         _ => Path::new("."),
     };
     fs::create_dir_all(dir).map_err(failed)?;
-    if !replace {
-        match File::create_new(path) {
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(Error::output_exists(&path.to_string_lossy()));
-            }
-            claimed => drop(claimed.map_err(failed)?),
-        }
-    }
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
     let temp = dir.join(format!(".image-convert-{}-{n}.tmp", std::process::id()));
     let written = File::create_new(&temp)
         .and_then(|mut f| f.write_all(bytes))
-        .and_then(|()| fs::rename(&temp, path));
+        .map_err(failed)
+        .and_then(|()| match replace {
+            true => fs::rename(&temp, path).map_err(failed),
+            false => take_name(&temp, path).map_err(|e| match e.kind() {
+                io::ErrorKind::AlreadyExists => Error::output_exists(&path.to_string_lossy()),
+                _ => failed(e),
+            }),
+        });
     if written.is_err() {
         let _ = fs::remove_file(&temp);
-        if !replace {
-            let _ = fs::remove_file(path);
+    }
+    written
+}
+
+/// Moves `temp` to `path` unless the name is taken: a hard link appears whole and never replaces.
+/// Where the file system has none (FAT, some shares), the name is claimed and then renamed over.
+fn take_name(temp: &Path, path: &Path) -> io::Result<()> {
+    match fs::hard_link(temp, path) {
+        Ok(()) => fs::remove_file(temp),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) => {
+            File::create_new(path)?;
+            fs::rename(temp, path).inspect_err(|_| {
+                let _ = fs::remove_file(path);
+            })
         }
     }
-    written.map_err(failed)
 }
 
 thread_local! {
