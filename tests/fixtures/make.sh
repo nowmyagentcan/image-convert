@@ -19,6 +19,12 @@ convert -size 53x37 'xc:rgb(80,160,220)' ppm:- | cjpeg -sample 1x1,1x1,2x2 -qual
 # Progressive with uneven chroma, a layout jpeg-decoder can't follow on this gradient.
 convert -size 53x37 gradient:'#102030-#f0e0d0' ppm:- | cjpeg -sample 1x2,2x1,1x4 -progressive -quality 90 > jpeg-progressive-uneven.jpg
 
+# One scan per component at 4x2,2x2,2x2, and what libjpeg reads from it.
+printf '0;\n1;\n2;\n' > scans.txt
+convert -seed 3 -size 201x151 plasma: -depth 8 ppm:- | cjpeg -sample 4x2,2x2,2x2 -scans scans.txt -quality 90 > jpeg-uneven-scans.jpg
+rm scans.txt
+djpeg -pnm jpeg-uneven-scans.jpg | convert ppm:- -strip png24:jpeg-uneven-scans-ref.png
+
 # CMYK JPEGs with an Adobe APP14 marker, ink 10/60/120/200, from two encoders.
 python3 -c "from PIL import Image; Image.new('CMYK', (8, 8), (10, 60, 120, 200)).save('jpeg-cmyk-pil.jpg', quality=100)"
 convert -size 8x8 'xc:cmyk(10,60,120,200)' -strip -quality 100 jpeg-cmyk-im.jpg

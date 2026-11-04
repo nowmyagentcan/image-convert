@@ -1961,3 +1961,100 @@ fn a_grey_jpeg_ignores_its_sampling_factor() {
     let diff = mean_diff(u8s(&decode(&file).unwrap()), &source);
     assert!(diff < 8.0, "{diff}");
 }
+
+#[test]
+#[ignore = "known bug: IC29"]
+fn a_jpeg_with_uneven_sampling_reads_right_or_is_refused() {
+    match decode(&fixture("jpeg-uneven-scans.jpg")) {
+        Ok(px) => {
+            let want = decode(&fixture("jpeg-uneven-scans-ref.png")).unwrap();
+            let diff = mean_diff(u8s(&px), u8s(&want));
+            assert!(diff < 3.0, "{diff}");
+        }
+        Err(e) => assert_eq!(e.code, "unsupported_variant"),
+    }
+}
+
+/// A TIFF page of JPEG strips, `width` wide and `rows` rows each.
+fn jpeg_strips(strips: &[Vec<u8>], width: u32, rows: u32) -> Vec<u8> {
+    let count = strips.len() as u32;
+    let mut at = 8;
+    let mut offsets = Vec::new();
+    for strip in strips {
+        offsets.extend((at as u32).to_le_bytes());
+        at += strip.len();
+    }
+    let lengths: Vec<u8> = strips
+        .iter()
+        .flat_map(|strip| (strip.len() as u32).to_le_bytes())
+        .collect();
+    let short = |tag, n| (tag, 3, 1, V::N(n));
+    let ifd = [
+        short(256, width),
+        short(257, rows * count),
+        (258, 3, 3, V::Blob(1)),
+        short(259, 7),
+        short(262, 6),
+        (273, 4, count, V::Blob(2)),
+        short(277, 3),
+        short(278, rows),
+        (279, 4, count, V::Blob(3)),
+        (530, 3, 2, V::N(2 | 2 << 16)),
+    ];
+    let blobs = [
+        &strips.concat()[..],
+        &[8, 0, 8, 0, 8, 0],
+        &offsets,
+        &lengths,
+    ];
+    raw_tiff(42, &blobs, &ifd, &[])
+}
+
+#[test]
+#[ignore = "known bug: IC39"]
+fn tiff_jpeg_strips_past_the_64th_decode() {
+    let source = gradient(48, 16, 3);
+    let [plain, separate] = [false, true].map(|optimised| {
+        jpeg(48, 16, Jpeg::Rgb, &source, |e| {
+            e.set_sampling_factor(SamplingFactor::F_2_2);
+            e.set_optimized_huffman_tables(optimised);
+        })
+    });
+    let mut last_differs = vec![plain; 64];
+    last_differs.push(separate.clone());
+    for strips in [vec![separate; 65], last_differs] {
+        let px = decode(&jpeg_strips(&strips, 48, 16)).unwrap();
+        let diff = mean_diff(&u8s(&px)[64 * source.len()..], &source);
+        assert!(diff < 8.0, "{diff}");
+    }
+}
+
+#[test]
+#[ignore = "known bug: IC40"]
+fn sizes_past_the_first_header_are_held_to_the_limits() {
+    let mut gif = b"GIF89a\x0a\0\x0a\0\x80\0\0\0\0\0\xff\xff\xff\x2c\0\0\0\0".to_vec();
+    gif.extend([20_000u16.to_le_bytes(), 20_000u16.to_le_bytes()].concat());
+    gif.extend(b"\0\x02\x02\x44\x01\0\x3b");
+    assert_eq!(decode(&gif).unwrap_err().code, "image_too_large");
+
+    let mut lossless = vec![0x2f];
+    lossless.extend((16_382u32 | 16_382 << 14).to_le_bytes());
+    let webp = riff_webp(&[chunk(b"VP8L", &lossless), chunk(b"VP8X", &[0; 10])]);
+    assert_eq!(decode(&webp).unwrap_err().code, "image_too_large");
+}
+
+#[test]
+#[ignore = "known bug: IC42"]
+fn a_data_image_that_cant_be_read_is_reported() {
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'>
+        <image width='16' height='16' href='data:image/jpeg;base64,{}'/></svg>",
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            fixture("jpeg-arithmetic.jpg")
+        )
+    );
+    if let Ok((px, _)) = svg(&doc, &Options::default()) {
+        assert!(!px.warnings.is_empty());
+    }
+}
