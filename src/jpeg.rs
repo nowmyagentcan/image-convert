@@ -1,6 +1,7 @@
 //! JPEG through zune-jpeg, after the frame header is read and unsupported codings are refused;
 //! the few layouts zune-jpeg 0.5.15 gets wrong go through jpeg-decoder.
 
+use jpeg_decoder::ColorTransform;
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
@@ -21,12 +22,36 @@ pub(crate) struct Frame {
     components: u8,
     /// The largest horizontal and vertical sampling factors of any component.
     sampling: (u8, u8),
+    /// The first component's sampling factors.
+    first_sampling: (u8, u8),
+    /// Whether three components have the ids R, G and B.
+    rgb_ids: bool,
+    /// Whether a JFIF APP0 segment is present.
+    jfif: bool,
     /// The Adobe APP14 colour transform, when that segment is present.
     adobe: Option<u8>,
     /// Where the first scan's marker is.
     scan: usize,
     /// How many components the first scan holds.
     scan_components: u8,
+}
+
+impl Frame {
+    /// Whether zune-jpeg 0.5.15 gets this layout wrong (fixed in its 0.5.16 pre-releases): one
+    /// scan per component, 4×2, 2×4 and 1×4 sampling, chroma finer than luma, and subsampled CMYK.
+    fn misread_by_zune(&self) -> bool {
+        let subsampled = self.components > 1 && self.sampling != (1, 1);
+        let odd = !matches!(self.sampling, (2, 1) | (1, 2) | (2, 2) | (4, 1));
+        let separate = matches!(self.marker, 0xc0 | 0xc1) && self.scan_components < self.components;
+        let fine_chroma = self.sampling != self.first_sampling;
+        separate || subsampled && (odd || fine_chroma || self.components == 4)
+    }
+
+    /// Whether three components hold RGB, not YCbCr: JFIF decides, then Adobe, then the ids, as
+    /// in libjpeg.
+    fn rgb(&self) -> bool {
+        !self.jfif && self.adobe.map_or(self.rgb_ids, |transform| transform == 0)
+    }
 }
 
 /// Decodes the first image of a JPEG (MPO and Ultra HDR files hold more): grey, RGB or CMYK.
@@ -57,13 +82,15 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         return Err(Error::corrupt("JPEG", "its image data is cut short"));
     }
 
-    // zune-jpeg 0.5.15 decodes these layouts to wrong colours (fixed in its 0.5.16 pre-releases):
-    // one scan per component, and subsampled 4×2, 2×4, 1×4 or CMYK.
-    let subsampled = frame.components > 1 && frame.sampling != (1, 1);
-    let odd = !matches!(frame.sampling, (2, 1) | (1, 2) | (2, 2) | (4, 1));
-    let separate = matches!(frame.marker, 0xc0 | 0xc1) && frame.scan_components < frame.components;
-    let (layout, samples, exif, icc) = if separate || subsampled && (odd || frame.components == 4) {
-        other(data, &frame)?
+    let (layout, samples, exif, icc) = if frame.misread_by_zune() {
+        other(data, &frame).map_err(|e| match frame.marker {
+            // jpeg-decoder 0.3.2 loses its place in some progressive scans of these layouts.
+            0xc2 if frame.components == 3 => {
+                let variant = "progressive scans and uneven chroma sampling";
+                Error::unsupported_variant("JPEG", variant)
+            }
+            _ => e,
+        })?
     } else {
         zune(data, &frame)?
     };
@@ -88,6 +115,13 @@ type Decoded = (Layout, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 /// Decodes with jpeg-decoder, which gives CMYK as ink whether or not an Adobe segment says so.
 fn other(data: &[u8], frame: &Frame) -> Result<Decoded, Error> {
     let mut decoder = jpeg_decoder::Decoder::new(data);
+    if frame.components == 3 {
+        decoder.set_color_transform(if frame.rgb() {
+            ColorTransform::RGB
+        } else {
+            ColorTransform::YCbCr
+        });
+    }
     let mut samples = decoder.decode().map_err(|e| Error::corrupt("JPEG", e))?;
     let layout = if frame.components == 3 {
         Layout::Rgb
@@ -137,6 +171,7 @@ pub(crate) fn frame(data: &[u8]) -> Result<Frame, Error> {
     let byte = |at: usize| data.get(at).copied().ok_or_else(cut);
     let word = |at: usize| Ok::<_, Error>(u16::from_be_bytes([byte(at)?, byte(at + 1)?]));
     let mut found = None;
+    let mut jfif = false;
     let mut adobe = None;
     let mut at = 2;
     loop {
@@ -161,10 +196,13 @@ pub(crate) fn frame(data: &[u8]) -> Result<Frame, Error> {
             0xc0..=0xcf if found.is_none() && !matches!(marker, 0xc4 | 0xc8 | 0xcc) => {
                 let components = byte(body + 5)?;
                 let mut sampling = (0, 0);
+                let mut ids = Vec::new();
                 for i in 0..usize::from(components) {
+                    ids.push(byte(body + 6 + 3 * i)?);
                     let factors = byte(body + 7 + 3 * i)?;
                     sampling = (sampling.0.max(factors >> 4), sampling.1.max(factors & 15));
                 }
+                let first = data.get(body + 7).copied().unwrap_or(0);
                 found = Some(Frame {
                     marker,
                     precision: byte(body)?,
@@ -172,12 +210,16 @@ pub(crate) fn frame(data: &[u8]) -> Result<Frame, Error> {
                     width: word(body + 3)?.into(),
                     components,
                     sampling,
+                    first_sampling: (first >> 4, first & 15),
+                    rgb_ids: ids == b"RGB",
+                    jfif: false,
                     adobe: None,
                     scan: 0,
                     scan_components: 0,
                 });
             }
             0xf7 => return Err(Error::unsupported_variant("JPEG", "JPEG-LS")),
+            0xe0 if data.get(body..body + 5) == Some(b"JFIF\0") => jfif = true,
             0xee if data.get(body..body + 5) == Some(b"Adobe") => adobe = Some(byte(body + 11)?),
             _ => {}
         }
@@ -185,6 +227,7 @@ pub(crate) fn frame(data: &[u8]) -> Result<Frame, Error> {
     }
     let frame = found.ok_or_else(|| Error::corrupt("JPEG", "it has no frame header"))?;
     Ok(Frame {
+        jfif,
         adobe,
         scan: at,
         scan_components: data.get(at + 4).copied().unwrap_or(0),
@@ -264,6 +307,9 @@ mod tests {
             height: 2,
             components: 1,
             sampling: (1, 1),
+            first_sampling: (1, 1),
+            rgb_ids: false,
+            jfif: true,
             adobe: None,
             scan: grey.windows(2).position(|w| w == [0xff, 0xda]).unwrap(),
             scan_components: 1,

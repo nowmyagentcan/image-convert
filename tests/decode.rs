@@ -1872,7 +1872,6 @@ fn all_near(px: &Pixels, colour: [u8; 3]) -> bool {
 }
 
 #[test]
-#[ignore = "known bug: IC22"]
 fn jpeg_marked_rgb_by_adobe_is_rgb_whatever_its_component_ids() {
     let colour = [80, 160, 220];
     for ids in [[82, 71, 66], [1, 2, 3]] {
@@ -1899,7 +1898,6 @@ fn jpeg_marked_rgb_by_adobe_is_rgb_whatever_its_component_ids() {
 }
 
 #[test]
-#[ignore = "known bug: IC23"]
 fn jpeg_with_chroma_sampled_finer_than_luma_decodes() {
     for name in ["jpeg-chroma-cb2x1.jpg", "jpeg-chroma-cr2x2.jpg"] {
         assert!(
@@ -1907,6 +1905,12 @@ fn jpeg_with_chroma_sampled_finer_than_luma_decodes() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn a_progressive_layout_no_decoder_here_reads_is_named() {
+    let err = decode(&fixture("jpeg-progressive-uneven.jpg")).unwrap_err();
+    assert_eq!(err.code, "unsupported_variant");
 }
 
 #[test]
