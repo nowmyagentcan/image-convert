@@ -81,6 +81,15 @@ impl<'a> Tiff<'a> {
         })
     }
 
+    fn u64(&self, at: usize) -> Option<u64> {
+        let b: [u8; 8] = self.data.get(at..at.checked_add(8)?)?.try_into().ok()?;
+        Some(if self.big {
+            u64::from_be_bytes(b)
+        } else {
+            u64::from_le_bytes(b)
+        })
+    }
+
     /// The IFD at `offset` and the offset of the next one (0 at the end of the chain or of the
     /// file); `None` when it lies outside the file or has more than 4,096 entries.
     pub fn ifd(&self, offset: usize) -> Option<(Ifd<'a>, usize)> {
@@ -150,7 +159,7 @@ impl<'a> Ifd<'a> {
         self.entries.iter().rfind(|e| e.tag == tag)
     }
 
-    /// Up to the first 64 values of an integer tag (BYTE, SHORT, LONG or IFD).
+    /// Up to the first 64 values of an integer tag, of any type the tiff crate reads as one.
     pub fn values(&self, tag: u16) -> Vec<u32> {
         self.first(tag, 64)
     }
@@ -167,9 +176,12 @@ impl<'a> Ifd<'a> {
         let t = &self.tiff;
         (0..e.count.min(most) as usize)
             .filter_map(|i| match e.kind {
-                1 => t.data.get(e.at + i).map(|&b| u32::from(b)),
+                1 | 7 => t.data.get(e.at + i).map(|&b| u32::from(b)),
                 3 => t.u16(e.at + 2 * i).map(u32::from),
                 4 | 13 => t.u32(e.at + 4 * i),
+                16 | 18 => t
+                    .u64(e.at + 8 * i)
+                    .map(|v| v.try_into().unwrap_or(u32::MAX)),
                 _ => None,
             })
             .collect()
@@ -188,13 +200,13 @@ impl<'a> Ifd<'a> {
     }
 }
 
-/// Bytes per value of a TIFF field type, 0 for types classic TIFF doesn't define.
+/// Bytes per value of a TIFF field type, 0 for types that don't exist.
 fn size_of_type(kind: u16) -> u64 {
     match kind {
         1 | 2 | 6 | 7 => 1,
         3 | 8 => 2,
         4 | 9 | 11 | 13 => 4,
-        5 | 10 | 12 => 8,
+        5 | 10 | 12 | 16..=18 => 8,
         _ => 0,
     }
 }

@@ -174,6 +174,23 @@ fn strips(strip: &[u8], rows: u32, count: u32) -> Vec<u8> {
     )
 }
 
+/// The RGB TIFF with its Compression tag stored as field type `kind`, which the tiff crate reads
+/// too; YCbCr would be refused for no compression it could see.
+fn compression_typed(tiff: &[u8], kind: u8) -> Vec<u8> {
+    let entry = |tag, value| [tag, 1, 3, 0, 1, 0, 0, 0, value, 0, 0, 0];
+    let find = |entry: [u8; 12]| tiff.windows(12).position(|w| w == entry).unwrap();
+    let (at, photometric) = (find(entry(3, 7)), find(entry(6, 6)));
+    let mut out = tiff.to_vec();
+    out[photometric + 8] = 2;
+    out[at + 2] = kind;
+    if kind == 16 {
+        let value = out.len() as u32;
+        out[at + 8..at + 12].copy_from_slice(&value.to_le_bytes());
+        out.extend(7u64.to_le_bytes());
+    }
+    out
+}
+
 /// A 64×64 page whose StripOffsets tag comes twice: `first`, then `last`, which a TIFF reader
 /// that takes the last of a repeated tag reads.
 fn repeated_strip_tag(first: &[u8], last: &[u8]) -> Vec<u8> {
@@ -418,6 +435,17 @@ fn a_jpeg_strip_on_the_tiff_crates_path_is_held_to_the_page() {
     refused("many.tif", &strips(&big, 1, 100));
     let smaller = sized(&interleaved(), 4000, 4000);
     refused("listed.tif", &strips(&smaller, 1, 60_000));
+}
+
+#[test]
+fn no_field_type_hides_a_jpeg_compression_tag_from_the_strip_walk() {
+    let big = strips(&sized(&interleaved(), 4000, 4000), 64, 1);
+    let good = strips(&interleaved(), 64, 1);
+    for (name, kind) in [("byte.tif", 1), ("undefined.tif", 7), ("long8.tif", 16)] {
+        refused(name, &compression_typed(&big, kind));
+        let (status, _) = convert("twin.tif", &compression_typed(&good, kind), 3000, 10);
+        assert!(status.success(), "{name}: {status}");
+    }
 }
 
 #[test]
