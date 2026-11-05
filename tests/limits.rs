@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use base64::prelude::*;
 use common::*;
 use jpeg_encoder::{ColorType as Jpeg, SamplingFactor};
 use serde_json::{Value, json};
@@ -228,6 +229,45 @@ fn nested_layers() -> String {
     )
 }
 
+/// An SVG drawing `svg` through a data image.
+fn as_data_image(svg: &str) -> String {
+    let data = BASE64_STANDARD.encode(svg);
+    format!(
+        "{SVG} xmlns:x='http://www.w3.org/1999/xlink' width='64' height='64'>\
+        <image width='64' height='64' x:href='data:image/svg+xml;base64,{data}'/></svg>"
+    )
+}
+
+/// `levels` masks, each drawing the one before twice: 2^levels renders of the first.
+fn doubling_masks(levels: u32) -> String {
+    let mut doc =
+        format!("{SVG} width='64' height='64'><mask id='m0'><rect width='9' height='9'/></mask>");
+    for i in 1..levels {
+        let use_it = format!("<rect width='9' height='9' mask='url(#m{})'/>", i - 1);
+        doc += &format!("<mask id='m{i}'>{use_it}{use_it}</mask>");
+    }
+    doc + &format!(
+        "<rect width='9' height='9' mask='url(#m{})'/></svg>",
+        levels - 1
+    )
+}
+
+/// [`doubling_masks`] with each reference in a stylesheet.
+fn doubling_masks_by_class(levels: u32) -> String {
+    let rules: String = (0..levels)
+        .map(|i| format!(".l{i}{{mask:url(#m{i})}}"))
+        .collect();
+    let mut doc = format!(
+        "{SVG} width='64' height='64'><style>{rules}</style>\
+        <mask id='m0'><rect width='9' height='9'/></mask>"
+    );
+    for i in 1..levels {
+        let use_it = format!("<rect width='9' height='9' class='l{}'/>", i - 1);
+        doc += &format!("<mask id='m{i}'>{use_it}{use_it}</mask>");
+    }
+    doc + &format!("<rect width='9' height='9' class='l{}'/></svg>", levels - 1)
+}
+
 /// A chain of `links` `element`s, each using the one before through `attribute`, and a rect at
 /// the end of it.
 fn chain(element: &str, attribute: &str, links: u32) -> String {
@@ -253,6 +293,22 @@ fn pattern_chain(links: u32) -> String {
     }
     let last = links - 1;
     doc + &format!("<rect width='9' height='9' fill='url(#c{last})'/></svg>")
+}
+
+/// `links` filters, each drawing through feImage a group that has the filter before.
+fn filter_chain(links: u32) -> String {
+    let group =
+        |i: u32, filter: &str| format!("<g id='g{i}' {filter}><rect width='9' height='9'/></g>");
+    let mut doc = format!(
+        "{SVG} xmlns:x='http://www.w3.org/1999/xlink' width='64' height='64'>{}",
+        group(0, "")
+    );
+    for i in 1..links {
+        let before = i - 1;
+        doc += &format!("<filter id='f{i}'><feImage x:href='#g{before}'/></filter>");
+        doc += &group(i, &format!("filter='url(#f{i})'"));
+    }
+    doc + "</svg>"
 }
 
 /// `references` uses of one entity of 3,000 bytes: 4.8 GB of text at 1.6 million.
@@ -307,6 +363,20 @@ fn svg_layers_are_held_to_a_budget() {
 }
 
 #[test]
+fn a_mask_drawn_twice_at_every_level_is_refused() {
+    refused("a.svg", doubling_masks(40).as_bytes());
+    refused("css.svg", doubling_masks_by_class(40).as_bytes());
+    refused("nested.svg", as_data_image(&doubling_masks(40)).as_bytes());
+    for (name, doc) in [
+        ("few.svg", doubling_masks(6)),
+        ("few-css.svg", doubling_masks_by_class(6)),
+    ] {
+        let (status, _) = convert(name, doc.as_bytes(), 3000, 10);
+        assert!(status.success(), "{name}: {status}");
+    }
+}
+
+#[test]
 #[cfg(unix)]
 fn a_jpeg_is_held_to_the_size_its_decoder_reads() {
     for (name, marker) in [("tem.jpg", 0x01), ("rst.jpg", 0xd0), ("soi.jpg", 0xd8)] {
@@ -348,7 +418,6 @@ fn a_right_sized_strip_listed_again_and_again_is_refused() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "known bug: IC36"]
 fn one_entity_cant_expand_past_the_limits() {
     refused("text.svg", flat_entity(1_600_000, false).as_bytes());
     refused("attribute.svg", flat_entity(1_600_000, true).as_bytes());
@@ -357,7 +426,22 @@ fn one_entity_cant_expand_past_the_limits() {
 }
 
 #[test]
-#[ignore = "known bug: IC37"]
+#[cfg(unix)]
+fn no_comment_or_quote_hides_an_entity_from_the_count() {
+    let doc = flat_entity(1_600_000, false);
+    for (before, after) in [
+        ("<!-- <!ENTITY b ' -->", "<!-- ' -->"),
+        ("<!ATTLIST svg x CDATA '<!--'>", "<!-- -->"),
+    ] {
+        let hidden = doc
+            .replacen("<!ENTITY", &format!("{before}<!ENTITY"), 1)
+            .replacen("]>", &format!("{after}]>"), 1);
+        refused("a.svg", hidden.as_bytes());
+    }
+    refused("nested.svg", as_data_image(&doc).as_bytes());
+}
+
+#[test]
 fn svg_reference_chains_cant_overflow_the_stack() {
     refused(
         "clip.svg",
@@ -367,6 +451,66 @@ fn svg_reference_chains_cant_overflow_the_stack() {
     refused("pattern.svg", pattern_chain(200_000).as_bytes());
     let (status, _) = convert("few.svg", chain("mask", "mask", 100).as_bytes(), 3000, 10);
     assert!(status.success());
+}
+
+#[test]
+fn a_namespace_prefix_doesnt_hide_a_chain() {
+    let doc = chain("s:clipPath", "clip-path", 200_000);
+    let doc = doc.replacen("<svg ", "<svg xmlns:s='http://www.w3.org/2000/svg' ", 1);
+    refused("a.svg", doc.as_bytes());
+}
+
+#[test]
+fn a_chain_in_a_stylesheet_is_a_chain() {
+    let rules: String = (0..300)
+        .map(|i| format!("#c{}{{clip-path:url(#c{i})}}", i + 1))
+        .collect();
+    let chain: String = (0..=300)
+        .map(|i| format!("<clipPath id='c{i}'><rect/></clipPath>"))
+        .collect();
+    let doc = format!(
+        "{SVG} width='64' height='64'><style>{rules}</style>{chain}\
+        <rect width='9' height='9' clip-path='url(#c300)'/></svg>"
+    );
+    refused("a.svg", doc.as_bytes());
+}
+
+#[test]
+fn chains_within_the_limit_still_render() {
+    for (name, doc) in [
+        ("clip.svg", chain("clipPath", "clip-path", 256)),
+        ("mask.svg", chain("mask", "mask", 256)),
+        ("pattern.svg", pattern_chain(256)),
+        ("filter.svg", filter_chain(128)),
+    ] {
+        let (status, _) = convert(name, doc.as_bytes(), 3000, 30);
+        assert!(status.success(), "{name}: {status}");
+    }
+}
+
+#[test]
+fn chains_in_data_images_add_up_only_when_nested() {
+    let image = |svg: &str| {
+        let data = BASE64_STANDARD.encode(svg);
+        format!("<image width='64' height='64' href='data:image/svg+xml;base64,{data}'/>")
+    };
+    let root = |body: String| format!("{SVG} width='64' height='64'>{body}</svg>");
+    let links = chain("mask", "mask", 200);
+    let side_by_side = root(image(&links).repeat(3));
+    let (status, _) = convert("side.svg", side_by_side.as_bytes(), 3000, 30);
+    assert!(status.success(), "{status}");
+    let with_image = links.replace("</svg>", &format!("{}</svg>", image(&links)));
+    refused("nested.svg", root(image(&with_image)).as_bytes());
+}
+
+#[test]
+fn many_clip_paths_side_by_side_still_render() {
+    let paths: String = (0..30_000)
+        .map(|i| format!("<clipPath id='c{i}'><rect width='9' height='9'/></clipPath><rect width='9' height='9' clip-path='url(#c{i})'/>"))
+        .collect();
+    let doc = format!("{SVG} width='64' height='64'>{paths}</svg>");
+    let (status, _) = convert("a.svg", doc.as_bytes(), 3000, 60);
+    assert!(status.success(), "{status}");
 }
 
 #[test]
