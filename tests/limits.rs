@@ -7,7 +7,8 @@
 mod common;
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -539,21 +540,44 @@ fn a_legal_16_bit_png_stays_under_2_gib() {
     assert!(status.success(), "{status}");
 }
 
-#[test]
-#[cfg(unix)]
-#[ignore = "known bug: IC32, IC33, IC34, IC36, IC37"]
-fn the_mcp_server_outlives_every_such_file() {
-    let dir = folder("mcp");
-    let files: [(&str, Vec<u8>); 5] = [
+/// A file for each way past the limits that would end the process.
+fn crash_files() -> Vec<(&'static str, Vec<u8>)> {
+    let big_strip = sized(&interleaved(), 16000, 16000);
+    vec![
         ("pattern.svg", huge_pattern().into_bytes()),
+        ("nested.svg", as_data_image(&huge_pattern()).into_bytes()),
+        ("layer.svg", huge_layer().into_bytes()),
+        ("layers.svg", nested_layers().into_bytes()),
         ("frame.jpg", second_frame(0x01)),
+        ("stuffed.jpg", behind_stuffing()),
         ("core.ico", core_header_ico(0xffff, 0xffff)),
-        ("entity.svg", flat_entity(1_600_000, false).into_bytes()),
         (
-            "chain.svg",
+            "fallback.tif",
+            strips(&sized(&separate_scans(), 65500, 65500), 64, 1),
+        ),
+        ("crate.tif", strips(&big_strip, 1, 100)),
+        ("entity.svg", flat_entity(1_600_000, false).into_bytes()),
+        ("attribute.svg", flat_entity(1_600_000, true).into_bytes()),
+        (
+            "clip.svg",
             chain("clipPath", "clip-path", 200_000).into_bytes(),
         ),
-    ];
+        ("mask.svg", chain("mask", "mask", 200_000).into_bytes()),
+        ("tiles.svg", pattern_chain(200_000).into_bytes()),
+    ]
+}
+
+#[test]
+#[cfg(unix)]
+fn the_mcp_server_outlives_every_such_file() {
+    let dir = folder("mcp");
+    let files = crash_files();
+    let good = dir.join("good.jpg");
+    fs::write(&good, interleaved()).unwrap();
+    let call = |id: usize, path: &PathBuf| {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+            "name": "view_image", "arguments": {"path": path}}})
+    };
     let mut lines = vec![
         json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
             "protocolVersion": "2025-11-25", "capabilities": {},
@@ -563,10 +587,8 @@ fn the_mcp_server_outlives_every_such_file() {
     for (id, (name, data)) in files.iter().enumerate() {
         let path = dir.join(name);
         fs::write(&path, data).unwrap();
-        lines.push(
-            json!({"jsonrpc": "2.0", "id": id + 1, "method": "tools/call", "params": {
-            "name": "view_image", "arguments": {"path": path}}}),
-        );
+        lines.push(call(2 * id + 1, &path));
+        lines.push(call(2 * id + 2, &good));
     }
     let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
     let mut child = capped(3000)
@@ -585,9 +607,61 @@ fn the_mcp_server_outlives_every_such_file() {
     let output = child.wait_with_output().unwrap();
     let replies = String::from_utf8(output.stdout).unwrap();
     assert_eq!(output.status.code(), Some(0), "{replies}");
-    assert_eq!(replies.lines().count(), files.len() + 1);
+    assert_eq!(replies.lines().count(), 2 * files.len() + 1);
     for reply in replies.lines().skip(1) {
         let reply: Value = serde_json::from_str(reply).unwrap();
-        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        // view_image renders smaller than the page, so a layer that size can fit.
+        let id = reply["id"].as_u64().unwrap() as usize;
+        let bad = id % 2 == 1 && !files[id / 2].0.starts_with("layer");
+        assert_eq!(
+            reply["result"]["isError"].as_bool().unwrap_or(false),
+            bad,
+            "{reply}"
+        );
     }
+}
+
+/// The status of a request to the page on `port`, with `head` after the request line.
+fn ask(port: u16, request: &str, head: &str, body: &[u8]) -> u16 {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let head = format!("{request} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{head}\r\n");
+    stream.write_all(head.as_bytes()).unwrap();
+    // A server that answers before reading the whole body may close early.
+    let _ = stream.write_all(body);
+    let mut response = vec![];
+    stream.read_to_end(&mut response).unwrap();
+    String::from_utf8_lossy(&response[9..12]).parse().unwrap()
+}
+
+#[test]
+#[cfg(unix)]
+fn the_page_server_outlives_every_such_file() {
+    let mut child = capped(3000)
+        .args(["ui", "--no-open"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let port = line
+        .strip_prefix("Open http://127.0.0.1:")
+        .and_then(|rest| rest.split_once(' '))
+        .unwrap()
+        .0
+        .parse()
+        .unwrap();
+    for (name, data) in crash_files() {
+        let upload = format!(
+            "Origin: http://127.0.0.1:{port}\r\nX-File-Name: {name}\r\nX-Options: {{}}\r\n\
+             Content-Length: {}\r\n",
+            data.len()
+        );
+        let status = ask(port, "POST /api/convert", &upload, &data);
+        assert_eq!(status, 422, "{name}");
+        assert_eq!(ask(port, "GET /", "", b""), 200, "after {name}");
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
