@@ -172,6 +172,26 @@ fn strips(strip: &[u8], rows: u32, count: u32) -> Vec<u8> {
     )
 }
 
+/// A 64×64 page whose StripOffsets tag comes twice: `first`, then `last`, which a TIFF reader
+/// that takes the last of a repeated tag reads.
+fn repeated_strip_tag(first: &[u8], last: &[u8]) -> Vec<u8> {
+    let short = |tag, n| (tag, 3, 1, V::N(n));
+    let ifd = [
+        short(256, 64),
+        short(257, 64),
+        (258, 3, 3, V::Blob(2)),
+        short(259, 7),
+        short(262, 6),
+        (273, 4, 1, V::Blob(0)),
+        (273, 4, 1, V::Blob(1)),
+        short(277, 3),
+        short(278, 64),
+        (279, 4, 1, V::N(first.len().max(last.len()) as u32)),
+        (530, 3, 2, V::N(1 | 1 << 16)),
+    ];
+    raw_tiff(42, &[first, last, &[8, 0, 8, 0, 8, 0]], &ifd, &[])
+}
+
 /// An ICO whose one BMP entry has a 12-byte core header saying `width` × `height`.
 fn core_header_ico(width: u16, height: u16) -> Vec<u8> {
     let mut image = 12u32.to_le_bytes().to_vec();
@@ -263,7 +283,6 @@ fn legal_png16() -> Vec<u8> {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "known bug: IC28"]
 fn a_jpeg_strip_on_the_fallback_decoder_is_held_to_the_page() {
     refused(
         "a.tif",
@@ -304,13 +323,27 @@ fn an_ico_with_a_core_header_is_held_to_its_size() {
 }
 
 #[test]
-#[ignore = "known bug: IC35"]
 fn a_jpeg_strip_on_the_tiff_crates_path_is_held_to_the_page() {
     let big = sized(&interleaved(), 16000, 16000);
     refused("one.tif", &strips(&big, 64, 1));
     refused("many.tif", &strips(&big, 1, 100));
     let smaller = sized(&interleaved(), 4000, 4000);
     refused("listed.tif", &strips(&smaller, 1, 60_000));
+}
+
+#[test]
+fn a_repeated_strip_tag_cant_hide_a_strip_from_the_page() {
+    let (good, big) = (interleaved(), sized(&interleaved(), 16000, 16000));
+    refused("last.tif", &repeated_strip_tag(&good, &big));
+    let (status, _) = convert("twin.tif", &repeated_strip_tag(&big, &good), 3000, 10);
+    assert!(status.success(), "{status}");
+}
+
+#[test]
+fn a_right_sized_strip_listed_again_and_again_is_refused() {
+    refused("a.tif", &strips(&interleaved(), 64, 1000));
+    let (status, _) = convert("twin.tif", &strips(&interleaved(), 64, 1), 3000, 10);
+    assert!(status.success(), "{status}");
 }
 
 #[test]

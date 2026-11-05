@@ -2011,7 +2011,6 @@ fn jpeg_strips(strips: &[Vec<u8>], width: u32, rows: u32) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "known bug: IC39"]
 fn tiff_jpeg_strips_past_the_64th_decode() {
     let source = gradient(48, 16, 3);
     let [plain, separate] = [false, true].map(|optimised| {

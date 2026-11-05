@@ -38,6 +38,8 @@ pub struct Ifd<'a> {
 const MAX_IFDS: usize = 64;
 const MAX_ENTRIES: usize = 4096;
 const MAX_DEPTH: u8 = 4;
+/// Legal tables fit in 3 KB; they are joined to each strip in turn.
+const MAX_JPEG_TABLES: usize = 64 << 10;
 
 impl<'a> Tiff<'a> {
     /// The header of `data` with TIFF's magic 42, or RW2's 0x55, and the offset of IFD0.
@@ -143,17 +145,27 @@ impl<'a> Tiff<'a> {
 }
 
 impl<'a> Ifd<'a> {
+    /// The tag's entry; the last of several, as the tiff crate reads it.
     pub fn get(&self, tag: u16) -> Option<&Entry> {
-        self.entries.iter().find(|e| e.tag == tag)
+        self.entries.iter().rfind(|e| e.tag == tag)
     }
 
     /// Up to the first 64 values of an integer tag (BYTE, SHORT, LONG or IFD).
     pub fn values(&self, tag: u16) -> Vec<u32> {
+        self.first(tag, 64)
+    }
+
+    /// Every value of an integer tag.
+    fn all(&self, tag: u16) -> Vec<u32> {
+        self.first(tag, u32::MAX)
+    }
+
+    fn first(&self, tag: u16, most: u32) -> Vec<u32> {
         let Some(e) = self.get(tag) else {
             return Vec::new();
         };
         let t = &self.tiff;
-        (0..e.count.min(64) as usize)
+        (0..e.count.min(most) as usize)
             .filter_map(|i| match e.kind {
                 1 => t.data.get(e.at + i).map(|&b| u32::from(b)),
                 3 => t.u16(e.at + 2 * i).map(u32::from),
@@ -343,7 +355,7 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         .with_limits(limits);
     let (w, h) = (page.width as usize, page.height as usize);
     let channels = page.colours + usize::from(page.extra);
-    let decoded = match misread_jpeg_strips(data, ifd0)? {
+    let decoded = match jpeg_strips(data, ifd0, &page)? {
         Some(samples) => DecodingResult::U8(samples),
         None => decoder.read_image().map_err(failed)?,
     };
@@ -401,28 +413,50 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
     })
 }
 
-/// The samples of JPEG strips when the tiff crate's zune-jpeg would misread one of them.
-fn misread_jpeg_strips(data: &[u8], ifd: &Ifd) -> Result<Option<Vec<u8>>, Error> {
+/// Holds every JPEG strip to the page before any is decoded, by the size its decoder will find,
+/// and gives the samples when the tiff crate's zune-jpeg would misread a strip.
+fn jpeg_strips(data: &[u8], ifd: &Ifd, page: &Page) -> Result<Option<Vec<u8>>, Error> {
     if ifd.value(259) != Some(7) {
         return Ok(None);
     }
-    let strip = |(at, len)| data.get(at as usize..)?.get(..len as usize);
-    let strips: Option<Vec<_>> = ifd
-        .values(273)
+    let wrong = |reason: &str| Error::corrupt("TIFF", reason);
+    let rows = ifd.value(278).unwrap_or(page.height).clamp(1, page.height);
+    let (offsets, lengths) = (ifd.all(273), ifd.all(279));
+    if offsets.len() != lengths.len() || offsets.len() != page.height.div_ceil(rows) as usize {
+        return Err(wrong("its strip lists don't fit the page"));
+    }
+    let strips: Option<Vec<_>> = offsets
         .into_iter()
-        .zip(ifd.values(279))
-        .map(strip)
+        .zip(lengths)
+        .map(|(at, len)| data.get(at as usize..)?.get(..len as usize))
         .collect();
-    let Some(strips) = strips.filter(|s| s.iter().any(|s| jpeg::misread_by_zune(s))) else {
-        return Ok(None);
-    };
+    let strips = strips.ok_or_else(|| wrong("a strip lies outside the file"))?;
+    // A strip listed again and again would cost its decode each time.
+    if strips.iter().map(|s| s.len()).sum::<usize>() > data.len() {
+        return Err(wrong("its strips overlap"));
+    }
     // JPEGTables is a JPEG of tables alone, joined to a strip without its EOI and the strip's SOI.
-    let tables = ifd.bytes(347).and_then(|t| t.strip_suffix(b"\xff\xd9"));
+    let tables = ifd
+        .bytes(347)
+        .and_then(|t| t.get(..t.len().checked_sub(2)?));
+    if tables.is_some_and(|t| t.len() > MAX_JPEG_TABLES) {
+        return Err(wrong("its JPEG tables are too long"));
+    }
     let start = tables.unwrap_or(&[0xff, 0xd8]);
+    let whole = |strip: &[u8]| [start, strip.get(2..).unwrap_or_default()].concat();
+    let misread = strips.iter().any(|s| jpeg::misread_by_zune(s));
+    for strip in &strips {
+        let (width, height) = jpeg::decoder_size(&whole(strip), misread)?;
+        if width != page.width || height > rows {
+            return Err(wrong("a JPEG strip's size doesn't fit the page"));
+        }
+    }
+    if !misread {
+        return Ok(None);
+    }
     let mut samples = Vec::new();
     for strip in strips {
-        let whole = [start, strip.get(2..).unwrap_or_default()].concat();
-        samples.extend(jpeg::untransformed(&whole)?);
+        samples.extend(jpeg::untransformed(&whole(strip))?);
     }
     Ok(Some(samples))
 }
