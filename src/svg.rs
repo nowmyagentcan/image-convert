@@ -162,10 +162,16 @@ fn embed(
         }
         _ => return Ok(None),
     };
-    let Ok(size) = imagesize::blob_size(&data) else {
+    let size = match kind {
+        Some(Kind::Jpeg) => jpeg::decoder_size(&data, jpeg::misread_by_zune(&data)).ok(),
+        _ => imagesize::blob_size(&data)
+            .ok()
+            .map(|size| (size.width as u32, size.height as u32)),
+    };
+    let Some((width, height)) = size else {
         return Ok(None);
     };
-    let (width, height) = (size.width as u64, size.height as u64);
+    let (width, height) = (u64::from(width), u64::from(height));
     let mut b = budget.lock().unwrap();
     b.pixels += width * height;
     if width > 65535 || height > 65535 || b.pixels > 200_000_000 {

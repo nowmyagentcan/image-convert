@@ -11,6 +11,9 @@ use crate::color::Colour;
 use crate::error::Error;
 use crate::{Layout, Pixels, Samples, check_size, exif_and_orientation};
 
+/// What jpeg-decoder may allocate for one image: a backstop behind the size checks.
+const MAX_BUFFER: usize = 2 << 30;
+
 /// What the markers before the first scan say about a JPEG.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Frame {
@@ -59,11 +62,29 @@ pub(crate) fn misread_by_zune(data: &[u8]) -> bool {
     frame(data).is_ok_and(|frame| frame.misread_by_zune())
 }
 
+/// The size the decoder that reads this JPEG finds in it: jpeg-decoder for `misread`, else
+/// zune-jpeg. Each walks the markers its own way, so neither has to meet [`frame`]'s frame header.
+pub(crate) fn decoder_size(data: &[u8], misread: bool) -> Result<(u32, u32), Error> {
+    if misread {
+        let mut decoder = jpeg_decoder::Decoder::new(data);
+        decoder.read_info().map_err(|e| Error::corrupt("JPEG", e))?;
+        let info = decoder.info().expect("read_info read the frame header");
+        Ok((info.width.into(), info.height.into()))
+    } else {
+        let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), sides());
+        let headers = decoder.decode_headers();
+        headers.map_err(|e| Error::corrupt("JPEG", e))?;
+        let (width, height) = decoder.dimensions().expect("the headers are decoded");
+        Ok((width as u32, height as u32))
+    }
+}
+
 /// The samples of a JPEG inside a TIFF, which says itself what colour they are. The transforms
 /// to RGB and CMYK leave them as they are, CMYK inverted; `ColorTransform::None` panics in 0.3.2.
 pub(crate) fn untransformed(data: &[u8]) -> Result<Vec<u8>, Error> {
     let cmyk = frame(data)?.components == 4;
     let mut decoder = jpeg_decoder::Decoder::new(data);
+    decoder.set_max_decoding_buffer_size(MAX_BUFFER);
     decoder.set_color_transform(if cmyk {
         ColorTransform::CMYK
     } else {
@@ -99,20 +120,27 @@ pub fn decode(data: &[u8]) -> Result<Pixels, Error> {
         ));
     }
     check_size(frame.width.into(), frame.height.into(), "JPEG")?;
+    let misread = frame.misread_by_zune();
+    // jpeg-decoder 0.3.2 loses its place in some progressive scans of these layouts.
+    let named = |e: Error| match frame.marker {
+        0xc2 if misread && frame.components == 3 => {
+            let variant = "progressive scans and uneven chroma sampling";
+            Error::unsupported_variant("JPEG", variant)
+        }
+        _ => e,
+    };
+    let (width, height) = decoder_size(data, misread).map_err(named)?;
+    check_size(width.into(), height.into(), "JPEG")?;
+    if (width, height) != (frame.width, frame.height) {
+        return Err(Error::corrupt("JPEG", "its frame headers disagree"));
+    }
     // zune-jpeg fills a cut-off image with grey; the scans of a whole one end at an EOI marker.
     if !ends(data, frame.scan) {
         return Err(Error::corrupt("JPEG", "its image data is cut short"));
     }
 
-    let (layout, samples, exif, icc) = if frame.misread_by_zune() {
-        other(data, &frame).map_err(|e| match frame.marker {
-            // jpeg-decoder 0.3.2 loses its place in some progressive scans of these layouts.
-            0xc2 if frame.components == 3 => {
-                let variant = "progressive scans and uneven chroma sampling";
-                Error::unsupported_variant("JPEG", variant)
-            }
-            _ => e,
-        })?
+    let (layout, samples, exif, icc) = if misread {
+        other(data, &frame).map_err(named)?
     } else {
         zune(data, &frame)?
     };
@@ -137,6 +165,7 @@ type Decoded = (Layout, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 /// Decodes with jpeg-decoder, which gives CMYK as ink whether or not an Adobe segment says so.
 fn other(data: &[u8], frame: &Frame) -> Result<Decoded, Error> {
     let mut decoder = jpeg_decoder::Decoder::new(data);
+    decoder.set_max_decoding_buffer_size(MAX_BUFFER);
     if frame.components == 3 {
         decoder.set_color_transform(if frame.rgb() {
             ColorTransform::RGB
@@ -157,6 +186,12 @@ fn other(data: &[u8], frame: &Frame) -> Result<Decoded, Error> {
     Ok((layout, samples, exif, decoder.icc_profile()))
 }
 
+fn sides() -> DecoderOptions {
+    DecoderOptions::default()
+        .set_max_width(65535)
+        .set_max_height(65535)
+}
+
 /// Decodes with zune-jpeg.
 fn zune(data: &[u8], frame: &Frame) -> Result<Decoded, Error> {
     // Four components come out raw, as zune-jpeg reads them (YCCK only after Adobe transform 2).
@@ -166,10 +201,7 @@ fn zune(data: &[u8], frame: &Frame) -> Result<Decoded, Error> {
         (_, Some(2)) => (Layout::Cmyk, ColorSpace::YCCK),
         _ => (Layout::Cmyk, ColorSpace::CMYK),
     };
-    let options = DecoderOptions::default()
-        .set_max_width(65535)
-        .set_max_height(65535)
-        .jpeg_set_out_colorspace(colorspace);
+    let options = sides().jpeg_set_out_colorspace(colorspace);
     let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
     let mut samples = decoder.decode().map_err(|e| Error::corrupt("JPEG", e))?;
     if colorspace == ColorSpace::YCCK {

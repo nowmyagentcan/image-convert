@@ -10,6 +10,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -32,8 +33,11 @@ fn capped(megabytes: u32) -> Command {
     }
 }
 
+/// A folder of its own for each call, as tests run side by side.
 fn folder(test: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("limits-{test}"));
+    static CALLS: AtomicU32 = AtomicU32::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("limits-{call}-{test}"));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -285,7 +289,6 @@ fn svg_layers_are_held_to_a_budget() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "known bug: IC33"]
 fn a_jpeg_is_held_to_the_size_its_decoder_reads() {
     for (name, marker) in [("tem.jpg", 0x01), ("rst.jpg", 0xd0), ("soi.jpg", 0xd8)] {
         refused(name, &second_frame(marker));
