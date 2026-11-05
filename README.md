@@ -94,7 +94,7 @@ Invalid arguments and files that can't be converted with `view_image` return `is
   - macOS: built in (AVIF needs macOS 13).
   - Linux: the distribution's libheif 1.13 or newer, e.g. `sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d`.
 - **EMF, EMZ and placeable WMF:** Windows only, drawn by GDI+.
-- **Limits:** 512 MiB per file; images up to 200 megapixels and 65,535 pixels per side; drawings render up to 16,384 pixels per side.
+- **Limits:** 512 MiB per file; images up to 200 megapixels and 65,535 pixels per side; drawings render up to 16,384 pixels per side, and one that would need over 2 GiB for its layers at that size is refused (render it smaller with `--width`).
 - **Not read:** PSD, JPEG 2000, PDF, PNM, QOI, OpenEXR, DICOM and RAW formats not listed above (each gets its own error and a hint); TIFF and JPEG variants named in the error, such as 12-bit or arithmetic-coded JPEG. Animations and multi-page files give their first frame or page, with a warning.
 - It makes no network requests; `ui` only listens on `127.0.0.1`.
 

@@ -268,6 +268,17 @@ impl Error {
         )
     }
 
+    /// An SVG whose layers, masks and pattern tiles need too much memory at this size.
+    pub fn render_too_large(width: u32, height: u32) -> Self {
+        let message =
+            format!("Rendering this SVG at {width}×{height} pixels would take over 2 GiB.");
+        e(
+            "image_too_large",
+            message,
+            Some("Use --width or --height to render it smaller."),
+        )
+    }
+
     pub fn corrupt(format: &str, reason: impl Display) -> Self {
         let reason = reason.to_string();
         let message = format!(

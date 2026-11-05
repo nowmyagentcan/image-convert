@@ -347,19 +347,37 @@ fn a_jpeg_strip_on_the_fallback_decoder_is_held_to_the_page() {
 }
 
 #[test]
-#[ignore = "known bug: IC32"]
 fn a_pattern_tile_too_big_to_allocate_is_refused() {
     refused("a.svg", huge_pattern().as_bytes());
+    refused("nested.svg", as_data_image(&huge_pattern()).as_bytes());
 }
 
 #[test]
 #[cfg(unix)]
-#[ignore = "known bug: IC32"]
 fn svg_layers_are_held_to_a_budget() {
     for (name, doc) in [("a.svg", huge_layer()), ("b.svg", nested_layers())] {
         let (status, _) = convert(name, doc.as_bytes(), 3000, 60);
         assert!(matches!(status.code(), Some(0 | 1)), "{name}: {status}");
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn a_filter_on_a_turned_group_is_held_to_its_turned_layer() {
+    let doc = format!(
+        "{SVG} width='2000' height='2000'><filter id='f' filterUnits='userSpaceOnUse' x='-9000' \
+        y='-9000' width='30000' height='30000'><feGaussianBlur stdDeviation='1'/></filter>\
+        <g transform='rotate(30)' filter='url(#f)'><rect x='-100000' y='-100000' width='300000' \
+        height='300000'/></g></svg>"
+    );
+    refused("a.svg", doc.as_bytes());
+}
+
+#[test]
+fn a_layer_within_the_budget_still_renders() {
+    let doc = huge_layer().replace("8192", "2000");
+    let (status, _) = convert("a.svg", doc.as_bytes(), 3000, 60);
+    assert!(status.success(), "{status}");
 }
 
 #[test]

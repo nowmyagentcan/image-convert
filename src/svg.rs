@@ -7,10 +7,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use flate2::read::GzDecoder;
-use resvg::tiny_skia::{Pixmap, Transform};
+use resvg::tiny_skia::{Pixmap, Rect, Transform};
+use resvg::usvg::filter::{Filter, Kind as Primitive};
 use resvg::usvg::fontdb::Source;
 use resvg::usvg::roxmltree::{self, Document, NodeId, ParsingOptions};
-use resvg::usvg::{ImageHrefResolver, ImageKind, Options as Parse, Tree};
+use resvg::usvg::{
+    ClipPath, Group, ImageHrefResolver, ImageKind, Mask, Node, Options as Parse, Paint, Pattern,
+    Tree,
+};
 
 use crate::color::to_srgb;
 use crate::detect::{Kind, detect, find};
@@ -27,6 +31,9 @@ const MAX_CHAIN: u32 = 256;
 /// How many references the bodies of referenced elements can come to, each counted as often as
 /// it is reached: usvg converts a mask again for each use, so two uses at every level double.
 const MAX_EXPANDED: u64 = 100_000;
+/// What resvg may hold at once: it sizes layers, masks and pattern tiles itself, and tiny-skia
+/// aborts the process on a pixmap it can't allocate.
+const MAX_RENDER: u64 = 2 << 30;
 
 /// What the images an SVG embeds add up to, over every use of each at every depth.
 #[derive(Default)]
@@ -124,8 +131,13 @@ pub fn render(data: &[u8], options: &Options) -> Result<(Pixels, (u32, u32)), Er
         warnings.push(Warning::external_image_skipped(first, skipped.len() - 1));
     }
 
-    let mut pixmap = Pixmap::new(width, height).expect("the size is checked above");
     let scale = Transform::from_scale(width as f32 / size.width(), height as f32 / size.height());
+    let target = (width, height);
+    let held = held_by_nodes(tree.root(), scale, target, layer_bounds(target));
+    if bytes(target).saturating_add(held) > MAX_RENDER {
+        return Err(Error::render_too_large(width, height));
+    }
+    let mut pixmap = Pixmap::new(width, height).expect("the size is checked above");
     resvg::render(&tree, scale, &mut pixmap.as_mut());
     let pixels = Pixels {
         width,
@@ -409,4 +421,169 @@ impl<'a> References<'a> {
         self.seen.insert(element.id(), links);
         links
     }
+}
+
+/// The bytes of a pixmap of this size.
+fn bytes((width, height): (u32, u32)) -> u64 {
+    u64::from(width)
+        .saturating_mul(height.into())
+        .saturating_mul(4)
+}
+
+/// What resvg keeps layers within on a pixmap of this size: 5 times its size, centred on it.
+fn layer_bounds((width, height): (u32, u32)) -> Rect {
+    let (width, height) = (width as f32, height as f32);
+    Rect::from_ltrb(-2.0 * width, -2.0 * height, 3.0 * width, 3.0 * height)
+        .expect("a pixmap has a size")
+}
+
+// The functions below add up the pixmaps resvg holds at once, in the steps of its own `render.rs`,
+// `clip.rs`, `mask.rs`, `path.rs`, `image.rs` and `filter/mod.rs`. `on` is the size of the pixmap
+// being drawn on, and `bounds` what layers are kept within.
+
+fn held_by_nodes(parent: &Group, ts: Transform, on: (u32, u32), bounds: Rect) -> u64 {
+    let children = parent.children().iter();
+    children
+        .map(|node| held_by_node(node, ts, on, bounds))
+        .max()
+        .unwrap_or(0)
+}
+
+fn held_by_node(node: &Node, ts: Transform, on: (u32, u32), bounds: Rect) -> u64 {
+    match node {
+        Node::Group(group) => held_by_group(group, ts, on, bounds),
+        Node::Text(text) => held_by_group(text.flattened(), ts, on, bounds),
+        Node::Path(path) => {
+            let fill = path.fill().map(|fill| fill.paint());
+            let stroke = path.stroke().map(|stroke| stroke.paint());
+            let paints = [fill, stroke].into_iter().flatten();
+            let tiles = paints.map(|paint| match paint {
+                Paint::Pattern(pattern) => held_by_tile(pattern, ts, bounds),
+                _ => 0,
+            });
+            tiles.max().unwrap_or(0)
+        }
+        Node::Image(image) => match image.kind() {
+            ImageKind::SVG(tree) => {
+                bytes(on).saturating_add(held_by_nodes(tree.root(), ts, on, layer_bounds(on)))
+            }
+            _ => {
+                let size = image.size();
+                bytes((size.width() as u32, size.height() as u32))
+            }
+        },
+    }
+}
+
+fn held_by_group(group: &Group, ts: Transform, on: (u32, u32), bounds: Rect) -> u64 {
+    let ts = ts.pre_concat(group.transform());
+    if !group.should_isolate() {
+        return held_by_nodes(group, ts, on, bounds);
+    }
+    // A filter runs unrotated: its layer turns with the group, and so do the bounds.
+    let rest = if group.filters().is_empty() {
+        Transform::identity()
+    } else {
+        let (sx, sy) = (ts.sx.hypot(ts.ky), ts.kx.hypot(ts.sy));
+        Transform::from_row(ts.sx / sx, ts.ky / sx, ts.kx / sy, ts.sy / sy, 0.0, 0.0)
+    };
+    let Some(inverse) = rest.invert() else {
+        return 0;
+    };
+    let ts = inverse.pre_concat(ts);
+    let bbox = group.layer_bounding_box().transform(ts);
+    let (Some(bounds), Some(bbox)) = (bounds.transform(inverse), bbox) else {
+        return 0;
+    };
+    let (left, top) = (bbox.left().max(bounds.left()), bbox.top().max(bounds.top()));
+    let (right, bottom) = (
+        bbox.right().min(bounds.right()),
+        bbox.bottom().min(bounds.bottom()),
+    );
+    if left >= right || top >= bottom {
+        return 0;
+    }
+    let layer = (
+        (right - left).ceil() as u32 + 4,
+        (bottom - top).ceil() as u32 + 4,
+    );
+    let ts = ts.post_translate(-left, -top);
+
+    let filters = group.filters().iter();
+    let filters = filters
+        .map(|filter| held_by_filter(filter, ts, layer))
+        .max();
+    let clip = group.clip_path().map(|clip| held_by_clip(clip, ts, layer));
+    let mask = group
+        .mask()
+        .map(|mask| held_by_mask(mask, ts, layer, bounds));
+    let held = held_by_nodes(group, ts, layer, bounds);
+    let held = [filters, clip, mask]
+        .into_iter()
+        .flatten()
+        .fold(held, u64::max);
+    bytes(layer).saturating_add(held)
+}
+
+fn held_by_tile(pattern: &Pattern, ts: Transform, bounds: Rect) -> u64 {
+    let (sx, sy) = ts.pre_concat(pattern.transform()).get_scale();
+    let rect = pattern.rect();
+    let size = (
+        (rect.width() * sx).round() as u32,
+        (rect.height() * sy).round() as u32,
+    );
+    if size.0 == 0 || size.1 == 0 {
+        return 0;
+    }
+    let scale = Transform::from_scale(sx, sy);
+    bytes(size).saturating_add(held_by_nodes(pattern.root(), scale, size, bounds))
+}
+
+/// Every result stays until the filter ends, and the input and a blur's buffers add to them.
+fn held_by_filter(filter: &Filter, ts: Transform, on: (u32, u32)) -> u64 {
+    let (sx, sy) = ts.get_scale();
+    let scale = Transform::from_scale(sx, sy);
+    let primitives = filter.primitives().iter();
+    let images = primitives.filter_map(|primitive| match primitive.kind() {
+        Primitive::Image(image) => Some(held_by_nodes(image.root(), scale, on, layer_bounds(on))),
+        _ => None,
+    });
+    let images = images.max().unwrap_or(0);
+    let results = filter.primitives().len() as u64 + 3;
+    bytes(on).saturating_mul(results).saturating_add(images)
+}
+
+fn held_by_clip(clip: &ClipPath, ts: Transform, on: (u32, u32)) -> u64 {
+    let held = held_by_clip_children(clip.root(), ts.pre_concat(clip.transform()), on);
+    let next = clip
+        .clip_path()
+        .map_or(0, |next| held_by_clip(next, ts, on));
+    (bytes(on) / 4 * 5).saturating_add(held.max(next))
+}
+
+fn held_by_clip_children(parent: &Group, ts: Transform, on: (u32, u32)) -> u64 {
+    let children = parent.children().iter().map(|child| match child {
+        Node::Text(text) => held_by_clip_children(text.flattened(), ts, on),
+        Node::Group(group) => {
+            let ts = ts.pre_concat(group.transform());
+            let children = held_by_clip_children(group, ts, on);
+            match group.clip_path() {
+                Some(clip) => bytes(on).saturating_add(held_by_clip(clip, ts, on).max(children)),
+                None => children,
+            }
+        }
+        _ => 0,
+    });
+    children.max().unwrap_or(0)
+}
+
+fn held_by_mask(mask: &Mask, ts: Transform, on: (u32, u32), bounds: Rect) -> u64 {
+    if mask.root().children().is_empty() {
+        return 0;
+    }
+    let held = held_by_nodes(mask.root(), ts, on, bounds);
+    let next = mask
+        .mask()
+        .map_or(0, |next| held_by_mask(next, ts, on, bounds));
+    (bytes(on) / 4 * 5).saturating_add(held.max(next))
 }
