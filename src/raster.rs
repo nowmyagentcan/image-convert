@@ -40,10 +40,12 @@ pub fn decode(data: &[u8], kind: Kind) -> Result<Pixels, Error> {
 
     let failed = |err| failure(kind, err);
     let mut decoder = open(data, kind).map_err(failed)?;
+    // The decoder can read another size than the header readers above.
+    let (width, height) = decoder.dimensions();
+    check_size(width.into(), height.into(), label)?;
     decoder.set_limits(limits()).map_err(failed)?;
     let icc = decoder.icc_profile().map_err(failed)?;
     let (exif, orientation) = exif_and_orientation(decoder.exif_metadata().map_err(failed)?);
-    let (width, height) = decoder.dimensions();
     let color = decoder.color_type();
     let mut buf = vec![0; decoder.total_bytes() as usize];
     decoder.read_image_boxed(&mut buf).map_err(failed)?;

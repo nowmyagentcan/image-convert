@@ -298,7 +298,6 @@ fn a_jpeg_is_held_to_the_size_its_decoder_reads() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "known bug: IC34"]
 fn an_ico_with_a_core_header_is_held_to_its_size() {
     refused("a.ico", &core_header_ico(0xffff, 0xffff));
     refused("b.ico", &core_header_ico(0xfffe, 0xffff));
