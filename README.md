@@ -1,6 +1,8 @@
 # image-convert
 
-Convert HEIC, AVIF, JPEG XL, SVG, TIFF, camera RAW and other images to PNG, JPEG or WebP: a command line tool with JSON output, a local web page, and an MCP server that lets AI agents look at any image. Everything runs on your computer.
+Convert HEIC, AVIF, JPEG XL, SVG, TIFF, camera RAW and other images to PNG, JPEG or WebP: a command line tool with JSON output, a local web page, and an MCP server that lets AI agents look at them. Everything runs on your computer.
+
+<img src=".github/screenshot.png" alt="The local page after converting eight files" width="420">
 
 ## Install
 
@@ -55,7 +57,7 @@ $ image-convert IMG_0042.avif logo.svg DSC_0001.NEF --fit vision
 - Sizing: `--fit vision` (longest side 1568, 1.15 megapixels) or `--fit vision-hd` (2048, 2.4), `--max-side`, `--max-megapixels`, `--width`, `--height`, and `--max-bytes 300KB`, which changes the format, lowers the quality or shrinks the image until the file fits, with a warning for each.
 - Exit codes: 0 every file converted, 1 a file failed (the others are still converted), 2 usage, 3 runtime.
 
-**The page:** `image-convert ui` opens a small page in your browser, served on `127.0.0.1` only. Drop images, choose them, or paste one with Ctrl+V; each result has a preview and Save. Nothing is written to disk. On Windows, double-clicking `image-convert.exe` opens the same page.
+**The page:** `image-convert ui` opens a small page in your browser, served on `127.0.0.1` only. Drop images, choose them, or paste one with Ctrl+V; each result has a preview and Save. Nothing is written to disk. On Windows, double-clicking `image-convert.exe` opens the same page. In this release, don't give it SVGs you don't trust (see [Known issues](#known-issues-in-v010)).
 
 ### Use with AI agents
 
@@ -71,7 +73,7 @@ image-convert scans/ -r --fit vision -o out/ --json
 {"files":[{"input":"IMG_0042.avif","output":"IMG_0042.jpg","input_format":"avif","source":{"width":4032,"height":3024,"bit_depth":10,"alpha":false,"frames":1,"orientation":1,"color":"srgb","profile":null,"decoder":"wic"},"format":"jpeg","width":1238,"height":928,"bytes":141829,"quality":85,"resized":true,"exif":false,"warnings":[],"error":null}],"converted":1,"failed":0}
 ```
 
-Or add the local MCP server (stdio), which has two tools:
+Or add the local MCP server (stdio), which has two tools. In this release, don't give it SVGs you don't trust (see [Known issues](#known-issues-in-v010)).
 
 - `view_image` returns the image itself, converted and shrunk to fit vision-model limits (at most 1,000,000 bytes by default), plus a JSON line with its sizes and warnings. It writes nothing, so a model can look at a HEIC, SVG or RAW file in one call. Arguments: `path`, and optionally `fit` (`vision` or `vision-hd`), `max_bytes`, `width`, `height`.
 - `convert_image` saves files as the CLI does and returns its `--json` object as `structuredContent`. Arguments: `paths` (files or folders; absolute paths are safest), and optionally `to`, `fit`, `max_side`, `max_megapixels`, `max_bytes`, `width`, `height`, `quality`, `background`, `keep_exif`, `output_dir`, `recursive`.
@@ -94,15 +96,26 @@ Invalid arguments and files that can't be converted with `view_image` return `is
   - macOS: built in (AVIF needs macOS 13).
   - Linux: the distribution's libheif 1.13 or newer, e.g. `sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d`.
 - **EMF, EMZ and placeable WMF:** Windows only, drawn by GDI+.
-- **Limits:** 512 MiB per file; images up to 200 megapixels and 65,535 pixels per side; drawings render up to 16,384 pixels per side, and one that would need over 2 GiB for its layers at that size is refused (render it smaller with `--width`). A drawing that would take over 1.5 GiB to build, at any size, or whose references run in a loop, is refused too.
+- **Limits:** 512 MiB per file; images up to 200 megapixels and 65,535 pixels per side; drawings render up to 16,384 pixels per side, and one that would need over 2 GiB for its layers at that size is refused (render it smaller with `--width`). A drawing estimated to take over 1.5 GiB to build, at any size, or whose references run in a loop, is refused too; the estimate has a known gap (below).
 - **Not read:** PSD, JPEG 2000, PDF, PNM, QOI, OpenEXR, DICOM and RAW formats not listed above (each gets its own error and a hint); TIFF and JPEG variants named in the error, such as 12-bit or arithmetic-coded JPEG. Animations and multi-page files give their first frame or page, with a warning.
 - It makes no network requests; `ui` only listens on `127.0.0.1`.
 
-Known limitations in v0.1.0:
+### Known issues in v0.1.0
 
-- HEIC through Windows was tested only for its missing-decoder message: no test machine had the HEVC extension. AVIF through Windows was tested on Windows 11 with the AV1 extension.
-- HDR HEIC and AVIF (PQ or HLG) come out differently by system: Windows and macOS tone-map them in the system's decoder, while Linux maps reference white to sRGB white without tone mapping and warns `hdr_clipped`, so one file can look different on each.
-- A 12 MP JPEG XL needs about 300 MB of memory while it decodes, and a 12 MP AVIF through Windows about 380 MB (other photos of that size need under 200 MB).
+**Don't feed untrusted SVGs to `ui` or `mcp` in this release.**
+
+- **Major, not fixed:** `mask:inherit` in a stylesheet isn't counted by the SVG build estimate, so a crafted SVG that should be refused isn't. One test file had reached 676 MB when stopped at 40 s; whether it ends the process wasn't shown. The fix is planned for v0.1.1.
+- **Crashes from crafted files may remain.** The last fixes in this release (the SVG build estimate, TIFF tag reading) had no independent verification, and their SVG regression tests were never shown failing before the fix. The estimates were measured on Linux; a few drawings ran up to 1.5 times over.
+- **16-bit images past 2 GiB:** a legal 16-bit image of about 170 megapixels or more can use about 3 GB, and runs out of memory where less is available: a 196 MP RGB TIFF with an extra channel ended the process under a 3 GB cap. In `ui` and `mcp` that ends the server.
+- **SVGs with huge viewBoxes can run long:** two large Mermaid charts (viewBoxes over 100,000 units) that an earlier build refused now run past 60 s, one at 1.27 GB, and aren't shown to finish.
+- **Heavy valid files have no time limit:** large filters, 200,000 CSS rules, EMFs with thousands of images, or one very long text run can take minutes at flat memory, and `mcp` handles one call at a time.
+- **Drawings with filters are over-counted:** a few that fit are refused at their default size; `--width 1024` works, and the error says so.
+- **GIF:** a frame larger than the file's screen size gets past the 200-megapixel check, up to about 2 GB.
+- **Damaged or unusual JPEGs:** data lost inside the scans with an end marker still after it can convert with no error (a cut file is refused). Some rare layouts decode with wrong colours and no warning: one scan per component with 4×2 luma, progressive with chroma finer than luma, or files whose JFIF and Adobe markers disagree. A grey JPEG with 3×1 sampling is refused as corrupt.
+- **Smaller:** JPEG output wider than 65,500 pixels is written with no warning, though libjpeg can't read it. A killed run can leave a hidden `.tmp` file, and without hard links the output name exists empty for a moment. A 190 MP data JPEG inside an SVG takes about 5 to 20 s and 1.3 GB. A data image the renderer can't read disappears with no warning.
+- **HEIC through Windows** was tested only for its missing-decoder message: no test machine had the HEVC extension. AVIF through Windows was tested on Windows 11 with the AV1 extension.
+- **HDR HEIC and AVIF (PQ or HLG) differ by system:** Windows and macOS tone-map them in the system's decoder, while Linux maps reference white to sRGB white without tone mapping and warns `hdr_clipped`, so one file can look different on each.
+- **Memory:** a 12 MP JPEG XL peaks at about 308 MB while it decodes, and a 12 MP AVIF through Windows at about 380 MB (other photos of that size need under 200 MB).
 - A damaged AVIF can make the system's AV1 decoder print its own messages to stderr; stdout and `--json` are unaffected.
 
 ## How it works
