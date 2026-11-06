@@ -635,6 +635,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "simplecss",
  "tiff",
  "tokio",
  "windows",

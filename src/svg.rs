@@ -10,7 +10,6 @@ use flate2::read::GzDecoder;
 use resvg::tiny_skia::{Pixmap, Rect, Transform};
 use resvg::usvg::filter::{Filter, Kind as Primitive};
 use resvg::usvg::fontdb::Source;
-use resvg::usvg::roxmltree::{self, Document, NodeId, ParsingOptions};
 use resvg::usvg::{
     ClipPath, Group, ImageHrefResolver, ImageKind, Mask, Node, Options as Parse, Paint, Pattern,
     Tree,
@@ -20,17 +19,12 @@ use crate::color::to_srgb;
 use crate::detect::{Kind, detect, find};
 use crate::encode::encode;
 use crate::error::{Error, Warning};
+use crate::svg_demand::{self, Demand, MAX_COST, MAX_DEPTH};
 use crate::{Format, Layout, Options, Pixels, Samples, jpeg, resize};
 
 static NOTO_SANS: &[u8] = include_bytes!("../assets/fonts/NotoSans-Regular.ttf");
 const MAX_INFLATED: u64 = 64 << 20;
 const MAX_NESTED_SVGS: u32 = 1000;
-/// How long a chain of references can be: usvg follows them by recursion, and each link of some
-/// chains (a filter's feImage) costs more than the last.
-const MAX_CHAIN: u32 = 256;
-/// How many references the bodies of referenced elements can come to, each counted as often as
-/// it is reached: usvg converts a mask again for each use, so two uses at every level double.
-const MAX_EXPANDED: u64 = 100_000;
 /// What resvg may hold at once: it sizes layers, masks and pattern tiles itself, and tiny-skia
 /// aborts the process on a pixmap it can't allocate.
 const MAX_RENDER: u64 = 2 << 30;
@@ -41,26 +35,22 @@ struct Embedded {
     pixels: u64,
     svgs: u32,
     svg_bytes: u64,
-    /// Every image's expansion, and the chains of the images being parsed: parsing an image
+    /// The cost of every image, and the depth of the images being parsed: parsing an image
     /// happens inside the parsing of the file around it.
-    links: Links,
+    demand: Demand,
     error: Option<Error>,
 }
 
-/// What following an SVG's references takes.
-#[derive(Clone, Copy, Default)]
-struct Links {
-    expanded: u64,
-    chain: u32,
-}
-
 impl Embedded {
-    fn link(&mut self, links: Links) -> Result<(), Error> {
-        self.links.expanded = self.links.expanded.saturating_add(links.expanded);
-        self.links.chain = self.links.chain.saturating_add(links.chain);
-        if self.links.expanded > MAX_EXPANDED || self.links.chain > MAX_CHAIN {
-            let variant = "references nested over 256 deep or expanding past 100,000";
+    fn add(&mut self, demand: Demand) -> Result<(), Error> {
+        self.demand.cost = self.demand.cost.saturating_add(demand.cost);
+        self.demand.depth = self.demand.depth.saturating_add(demand.depth);
+        if self.demand.depth > MAX_DEPTH {
+            let variant = "references in a loop, or nesting past what can be followed";
             return Err(Error::unsupported_variant("SVG", variant));
+        }
+        if self.demand.cost > MAX_COST {
+            return Err(Error::drawing_too_large());
         }
         Ok(())
     }
@@ -86,7 +76,7 @@ pub fn ungzip(data: &[u8]) -> Result<(Vec<u8>, Kind), Error> {
 /// the size `options` gives it; returns the pixels and the drawing's own size in px.
 pub fn render(data: &[u8], options: &Options) -> Result<(Pixels, (u32, u32)), Error> {
     let mut budget = Embedded::default();
-    budget.link(refuse(data)?)?;
+    budget.add(refuse(data)?)?;
     let skipped = Mutex::new(Vec::new());
     let embedded = Mutex::new(budget);
     let mut parse = Parse {
@@ -117,7 +107,8 @@ pub fn render(data: &[u8], options: &Options) -> Result<(Pixels, (u32, u32)), Er
     fonts.set_fantasy_family("Noto Sans");
     let tree = Tree::from_data(data, &parse);
     drop(parse);
-    if let Some(error) = embedded.into_inner().unwrap().error {
+    let embedded = embedded.into_inner().unwrap();
+    if let Some(error) = embedded.error {
         return Err(error);
     }
     let tree = tree.map_err(|e| Error::corrupt("SVG", e))?;
@@ -134,7 +125,11 @@ pub fn render(data: &[u8], options: &Options) -> Result<(Pixels, (u32, u32)), Er
     let scale = Transform::from_scale(width as f32 / size.width(), height as f32 / size.height());
     let target = (width, height);
     let held = held_by_nodes(tree.root(), scale, target, layer_bounds(target));
-    if bytes(target).saturating_add(held) > MAX_RENDER {
+    if bytes(target)
+        .saturating_add(held)
+        .saturating_add(embedded.demand.cost)
+        > MAX_RENDER
+    {
         return Err(Error::render_too_large(width, height));
     }
     let mut pixmap = Pixmap::new(width, height).expect("the size is checked above");
@@ -155,8 +150,8 @@ pub fn render(data: &[u8], options: &Options) -> Result<(Pixels, (u32, u32)), Er
 }
 
 /// Refuses what parsing has no limit for, UTF-16 text and entities that expand other entities or
-/// expand past 64 MiB, and gives what its references take, for [`Embedded::link`].
-fn refuse(data: &[u8]) -> Result<Links, Error> {
+/// expand past 64 MiB, and gives what building it takes, for [`Embedded::add`].
+fn refuse(data: &[u8]) -> Result<Demand, Error> {
     if data.starts_with(b"\xff\xfe") || data.starts_with(b"\xfe\xff") || data.contains(&0) {
         return Err(Error::unsupported_variant("SVG", "UTF-16 text"));
     }
@@ -169,7 +164,7 @@ fn refuse(data: &[u8]) -> Result<Links, Error> {
         let variant = "entities that expand past 64 MiB";
         return Err(Error::unsupported_variant("SVG", variant));
     }
-    Ok(links(data))
+    Ok(svg_demand::demand(data))
 }
 
 /// A data image for usvg, held to the limits with every image resolved before it; a nested SVG
@@ -198,9 +193,9 @@ fn embed(
                 },
             };
             let svg = inflated.as_deref().unwrap_or(&data);
-            let links = refuse(svg)?;
+            let demand = refuse(svg)?;
             let mut b = budget.lock().unwrap();
-            b.link(links)?;
+            b.add(demand)?;
             b.svgs += 1;
             b.svg_bytes += svg.len() as u64;
             if b.svgs > MAX_NESTED_SVGS || b.svg_bytes > MAX_INFLATED {
@@ -209,7 +204,7 @@ fn embed(
             }
             drop(b);
             let tree = Tree::from_data_nested(svg, parse).ok();
-            budget.lock().unwrap().links.chain -= links.chain;
+            budget.lock().unwrap().demand.depth -= demand.depth;
             return Ok(tree.map(ImageKind::SVG));
         }
         _ => return Ok(None),
@@ -300,127 +295,6 @@ fn expansion(data: &[u8], entities: &[(&[u8], &[u8])]) -> u64 {
         .filter_map(|name| longest.get(name))
         .map(|&length| length as u64)
         .sum()
-}
-
-/// What following the references in an SVG takes; a file that doesn't parse is left to usvg.
-fn links(data: &[u8]) -> Links {
-    let options = ParsingOptions {
-        allow_dtd: true,
-        ..ParsingOptions::default()
-    };
-    let doc = std::str::from_utf8(data)
-        .ok()
-        .and_then(|text| Document::parse_with_options(text, options).ok());
-    let Some(doc) = doc else {
-        return Links::default();
-    };
-    let mut css: HashMap<&str, Vec<&str>> = HashMap::new();
-    let elements = || doc.descendants().filter(|node| node.is_element());
-    for style in elements().filter(|node| node.tag_name().name() == "style") {
-        for rule in style
-            .children()
-            .filter_map(|text| text.text())
-            .flat_map(|t| t.split('}'))
-        {
-            let Some((selectors, body)) = rule.split_once('{') else {
-                continue;
-            };
-            for selector in selectors.split(',') {
-                css.entry(css_class(selector))
-                    .or_default()
-                    .extend(urls(body));
-            }
-        }
-    }
-    let ids = elements().filter_map(|node| Some((node.attribute("id")?, node)));
-    let mut walk = References {
-        ids: ids.collect(),
-        css,
-        seen: HashMap::new(),
-    };
-    walk.follow(doc.root(), 0)
-}
-
-/// The class a CSS selector's last part names; empty, for any element, when it names none.
-fn css_class(selector: &str) -> &str {
-    let last = selector.rsplit(|c: char| c.is_whitespace() || matches!(c, '>' | '+' | '~'));
-    let last = last.into_iter().find(|part| !part.is_empty());
-    let plain = |class: &&str| {
-        class
-            .chars()
-            .all(|c| c.is_alphanumeric() || "-_".contains(c))
-    };
-    let class = last.and_then(|part| part.rsplit_once('.'));
-    class.map(|(_, class)| class).filter(plain).unwrap_or("")
-}
-
-/// The ids named by `url(#id)` in a value.
-fn urls(value: &str) -> impl Iterator<Item = &str> {
-    value.split("url(").skip(1).filter_map(|rest| {
-        let (target, _) = rest.split_once(')')?;
-        target.trim().trim_matches(['"', '\'']).strip_prefix('#')
-    })
-}
-
-type Element<'a> = roxmltree::Node<'a, 'a>;
-
-/// A walk of an SVG's references, with the rules of its stylesheets by class.
-struct References<'a> {
-    ids: HashMap<&'a str, Element<'a>>,
-    css: HashMap<&'a str, Vec<&'a str>>,
-    seen: HashMap<NodeId, Links>,
-}
-
-impl<'a> References<'a> {
-    /// What `element`'s own references name, in attributes and through stylesheets. A gradient
-    /// holds nothing to follow, and usvg shares it.
-    fn targets(&self, element: Element<'a>) -> Vec<Element<'a>> {
-        let classes = element.attribute("class").unwrap_or_default();
-        let rules = classes.split_ascii_whitespace().chain([""]);
-        let rules = rules
-            .filter_map(|class| self.css.get(class))
-            .flatten()
-            .copied();
-        let attributes = element.attributes().flat_map(|attribute| {
-            let value = attribute.value();
-            let href = value
-                .strip_prefix('#')
-                .filter(|_| attribute.name() == "href");
-            urls(value).chain(href)
-        });
-        rules
-            .chain(attributes)
-            .filter_map(|id| self.ids.get(id).copied())
-            .filter(|target| !target.tag_name().name().ends_with("Gradient"))
-            .collect()
-    }
-
-    /// What following everything inside `element` takes, stopping once it is past the limits.
-    /// A reference back to an element being followed counts for nothing: usvg drops those.
-    fn follow(&mut self, element: Element<'a>, depth: u32) -> Links {
-        if let Some(&known) = self.seen.get(&element.id()) {
-            return known;
-        }
-        let mut links = Links::default();
-        if depth > MAX_CHAIN {
-            links.chain = depth;
-            return links;
-        }
-        self.seen.insert(element.id(), links);
-        'all: for node in element.descendants().filter(|node| node.is_element()) {
-            for target in self.targets(node) {
-                let inner = self.follow(target, depth + 1);
-                let reached = u64::from(depth > 0);
-                links.expanded = links.expanded.saturating_add(inner.expanded + reached);
-                links.chain = links.chain.max(inner.chain.saturating_add(1));
-                if links.expanded > MAX_EXPANDED || links.chain > MAX_CHAIN {
-                    break 'all;
-                }
-            }
-        }
-        self.seen.insert(element.id(), links);
-        links
-    }
 }
 
 /// The bytes of a pixmap of this size.

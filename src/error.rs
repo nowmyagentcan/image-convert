@@ -258,6 +258,16 @@ impl Error {
         )
     }
 
+    /// An SVG that would take too much memory to build, at any size.
+    pub fn drawing_too_large() -> Self {
+        let message = "This SVG would take over 1.5 GiB to build.";
+        e(
+            "image_too_large",
+            message,
+            Some("Simplify the drawing first."),
+        )
+    }
+
     /// An SVG whose embedded images, over every use of each, pass the limits.
     pub fn embeds_too_much(what: &str) -> Self {
         let message = format!("The images inside this SVG {what}.");

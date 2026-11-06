@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use base64::prelude::*;
 use common::*;
+use flate2::{Compression, write::GzEncoder};
 use jpeg_encoder::{ColorType as Jpeg, SamplingFactor};
 use serde_json::{Value, json};
 
@@ -286,6 +287,87 @@ fn doubling_masks_by_class(levels: u32) -> String {
     doc + &format!("<rect width='9' height='9' class='l{}'/></svg>", levels - 1)
 }
 
+/// Checks that `doc` converts under the cap.
+fn renders(name: &str, doc: &str) {
+    let (status, json) = convert(name, doc.as_bytes(), 3000, 60);
+    assert!(status.success(), "{name}: {status} {json}");
+}
+
+/// A drawing of `body` that may use `xlink:href`.
+fn drawing(body: &str) -> String {
+    format!(
+        "{SVG} xmlns:xlink='http://www.w3.org/1999/xlink' width='800' height='600'>{body}</svg>"
+    )
+}
+
+/// A path of `segments` line segments, as `d`.
+fn long_path(segments: usize) -> String {
+    format!("M0 0{}", "l1 1".repeat(segments))
+}
+
+/// A 1×1 PNG with `padding` bytes after it, as base64.
+fn padded_png(padding: usize) -> String {
+    let mut png = Vec::new();
+    png::Encoder::new(&mut png, 1, 1)
+        .write_header()
+        .unwrap()
+        .write_image_data(&[0])
+        .unwrap();
+    png.resize(png.len() + padding, 0);
+    BASE64_STANDARD.encode(png)
+}
+
+/// Masks each drawing the next rect twice through `use`, with `href` giving each reference.
+fn doubling_uses(levels: u32, href: impl Fn(String) -> String) -> String {
+    let body: String = (0..levels)
+        .map(|i| {
+            let draw = format!("<use href='{}'/>", href(format!("r{}", i + 1)));
+            format!(
+                "<mask id='m{i}'>{draw}{draw}</mask>\
+                <rect id='r{i}' width='9' height='9' mask='url(#m{i})'/>"
+            )
+        })
+        .collect();
+    let first = href("r0".into());
+    drawing(&format!(
+        "<defs>{body}<rect id='r{levels}' width='9' height='9'/></defs><use href='{first}'/>"
+    ))
+}
+
+/// An SVG with `levels` gzipped data SVGs one inside the other, each under `depth` groups.
+fn nested_depth(levels: u32, depth: usize) -> Vec<u8> {
+    let gzip = |svg: &str| {
+        let mut gz = GzEncoder::new(Vec::new(), Compression::best());
+        gz.write_all(svg.as_bytes()).unwrap();
+        gz.finish().unwrap()
+    };
+    let mut inner = format!("{SVG} width='8' height='8'><rect width='8' height='8'/></svg>");
+    for _ in 0..levels {
+        let data = BASE64_STANDARD.encode(gzip(&inner));
+        let image =
+            format!("<image width='8' height='8' href='data:image/svg+xml;base64,{data}'/>");
+        let (open, close) = ("<g opacity='.9'>".repeat(depth), "</g>".repeat(depth));
+        inner = format!("{SVG} width='8' height='8'>{open}{image}{close}</svg>");
+    }
+    inner.into_bytes()
+}
+
+/// `links` `element`s, each drawing a rect that refers to the next, the last back to the first.
+fn reference_loop(element: &str, attribute: &str, links: u32, extra: &str) -> String {
+    let body: String = (0..links)
+        .map(|i| {
+            let next = (i + 1) % links;
+            format!(
+                "<{element} id='c{i}' {extra}><rect width='9' height='9' \
+                {attribute}='url(#c{next})'/></{element}>"
+            )
+        })
+        .collect();
+    drawing(&format!(
+        "{body}<rect width='9' height='9' {attribute}='url(#c0)'/>"
+    ))
+}
+
 /// A chain of `links` `element`s, each using the one before through `attribute`, and a rect at
 /// the end of it.
 fn chain(element: &str, attribute: &str, links: u32) -> String {
@@ -548,6 +630,309 @@ fn chains_in_data_images_add_up_only_when_nested() {
     assert!(status.success(), "{status}");
     let with_image = links.replace("</svg>", &format!("{}</svg>", image(&links)));
     refused("nested.svg", root(image(&with_image)).as_bytes());
+}
+
+#[test]
+fn a_chart_styled_for_a_few_of_its_elements_still_renders() {
+    let neo = "#m [data-look=\"neo\"].node";
+    let rules = format!(
+        "{neo} rect,{neo} polygon,{neo} circle{{stroke:#123;filter:url(#s)}}\
+        {neo} .outer-path{{filter:url(#s)}}#m .label{{fill:#333}}"
+    );
+    let shadow =
+        "<filter id='s'><feGaussianBlur stdDeviation='2'/><feOffset dx='2'/><feFlood/></filter>";
+    let node = "<g class='node'><rect width='9' height='9'/><text class='label'>a</text></g>";
+    let body = format!("<style>{rules}</style>{shadow}{}", node.repeat(3000));
+    renders(
+        "a.svg",
+        &drawing(&body).replacen("<svg ", "<svg id='m' ", 1),
+    );
+}
+
+#[test]
+fn a_block_placed_many_times_still_renders() {
+    let parts: String = (0..120)
+        .map(|i| format!("<path id='q{i}' d='M0 0h{}v3z'/>", i % 9 + 1))
+        .collect();
+    let block: String = (0..120)
+        .map(|i| format!("<use xlink:href='#q{i}' x='{}'/>", i % 11))
+        .collect();
+    let places: String = (0..1000)
+        .map(|i| {
+            let (x, y) = (i % 100 * 20, i / 100 * 20);
+            format!("<use xlink:href='#b' x='{x}' y='{y}'/>")
+        })
+        .collect();
+    let doc = drawing(&format!(
+        "<defs>{parts}<g id='b'>{block}</g></defs>{places}"
+    ));
+    renders("blocks.svg", &doc);
+
+    let clipped = "<rect width='9' height='9' clip-path='url(#c)'/>".repeat(6);
+    let symbols: String = (0..20_000)
+        .map(|i| {
+            let (x, y) = (i % 200 * 20, i / 200 * 20);
+            format!("<use xlink:href='#t' x='{x}' y='{y}'/>")
+        })
+        .collect();
+    let clip = "<clipPath id='c'><rect width='9' height='9'/></clipPath>";
+    let doc = drawing(&format!(
+        "<defs>{clip}<g id='t'>{clipped}</g></defs>{symbols}"
+    ));
+    renders("symbols.svg", &doc);
+
+    let glyphs: String = (0..60)
+        .map(|i| {
+            format!(
+                "<symbol id='g{i}'><path d='M{} 0h3v5h-3z'/></symbol>",
+                i % 9
+            )
+        })
+        .collect();
+    let text: String = (0..120_000)
+        .map(|i| {
+            let (x, y) = (i % 400 * 2, i / 400 * 6);
+            format!("<use xlink:href='#g{}' x='{x}' y='{y}'/>", i % 60)
+        })
+        .collect();
+    let doc = drawing(&format!(
+        "<defs>{glyphs}<g id='page'>{text}</g></defs><use xlink:href='#page' opacity='.9'/>"
+    ));
+    renders("glyphs.svg", &doc);
+}
+
+#[test]
+fn a_link_or_an_animation_refers_to_nothing_usvg_draws() {
+    let slides: String = (0..5000)
+        .map(|i| {
+            let next = i + 1;
+            format!("<g id='s{i}'><a xlink:href='#s{next}'><rect width='9' height='9'/></a></g>")
+        })
+        .collect();
+    renders("slides.svg", &drawing(&slides));
+    let animated: String = (0..300)
+        .map(|i| {
+            let next = i + 1;
+            format!(
+                "<rect id='r{i}' width='9' height='9'><animate xlink:href='#r{next}' \
+                attributeName='x' to='9' dur='1s'/></rect>"
+            )
+        })
+        .collect();
+    renders("smil.svg", &drawing(&animated));
+}
+
+#[test]
+#[cfg(unix)]
+fn no_space_in_a_reference_hides_it() {
+    let before = doubling_uses(24, |id| format!(" #{id}"));
+    refused("before.svg", before.as_bytes());
+    let after = doubling_uses(24, |id| format!("#{id} "));
+    refused("after.svg", after.as_bytes());
+    let doc = doubling_masks(24);
+    let inside = doc.replace("'url(#m", "'url( #m").replace(")'", " )'");
+    refused("inside.svg", inside.as_bytes());
+    let quoted = doc.replace("'url(#m", "'url( \" #m").replace(")'", "\" )'");
+    refused("quoted.svg", quoted.as_bytes());
+}
+
+#[test]
+fn nesting_adds_up_across_data_svgs() {
+    refused("deep.svg", &nested_depth(40, 1000));
+    let (status, json) = convert("few.svg", &nested_depth(4, 1000), 3000, 30);
+    assert!(status.success(), "{status} {json}");
+}
+
+#[test]
+fn a_loop_of_references_cant_overflow_the_stack() {
+    let tile = "patternUnits='userSpaceOnUse' width='9' height='9'";
+    let rect = "width='9' height='9'";
+    for links in [3, 5] {
+        let masks = reference_loop("mask", "mask", links, "");
+        refused("mask.svg", masks.as_bytes());
+        let clips = reference_loop("clipPath", "clip-path", links, "");
+        refused("clip.svg", clips.as_bytes());
+        let tiles = reference_loop("pattern", "fill", links, tile);
+        refused("tile.svg", tiles.as_bytes());
+    }
+    let filters: String = (0..3)
+        .map(|i| {
+            let next = (i + 1) % 3;
+            format!(
+                "<filter id='f{i}'><feImage href='#r{i}'/></filter>\
+                <rect id='r{i}' {rect} filter='url(#f{next})'/>"
+            )
+        })
+        .collect();
+    refused("filter.svg", drawing(&filters).as_bytes());
+    let mask_and_tile = format!(
+        "<mask id='m'><rect {rect} fill='url(#p)'/></mask>\
+        <pattern id='p' {tile}><rect {rect} mask='url(#m)'/></pattern><rect {rect} mask='url(#m)'/>"
+    );
+    refused("mixed.svg", drawing(&mask_and_tile).as_bytes());
+    let fill_and_stroke = format!(
+        "<pattern id='p' {tile}><rect {rect} fill='url(#q)'/></pattern>\
+        <pattern id='q' {tile}><rect {rect} stroke='url(#p)'/></pattern><rect {rect} fill='url(#p)'/>"
+    );
+    refused("paints.svg", drawing(&fill_and_stroke).as_bytes());
+    renders("mask.svg", &reference_loop("mask", "mask", 1, ""));
+    renders("clip.svg", &reference_loop("clipPath", "clip-path", 1, ""));
+    let marker = |id, next| {
+        format!(
+            "<marker id='{id}'><path d='M0 0L1 1L2 2' stroke='#000' marker-mid='url(#{next})'/>\
+            </marker>"
+        )
+    };
+    let (a, b) = (marker("a", "b"), marker("b", "a"));
+    let doc = format!("{a}{b}<path d='M0 0L1 1L2 2' stroke='#000' marker-mid='url(#a)'/>");
+    renders("markers.svg", &drawing(&doc));
+}
+
+#[test]
+#[cfg(unix)]
+fn what_a_reference_draws_counts_for_each_use() {
+    let path = long_path(50_000);
+    let uses = "<use href='#p'/>".repeat(20_000);
+    let doc = drawing(&format!("<defs><path id='p' d='{path}'/></defs>{uses}"));
+    refused("use.svg", doc.as_bytes());
+    let rects = "<rect width='9' height='9' mask='url(#m)'/>".repeat(20_000);
+    let mask = format!("<mask id='m'><path d='{path}' fill='#fff'/></mask>");
+    refused(
+        "mask.svg",
+        drawing(&format!("<defs>{mask}</defs>{rects}")).as_bytes(),
+    );
+    let text = format!("<text id='t' font-size='9'>{}</text>", "A".repeat(20_000));
+    let uses = "<use href='#t'/>".repeat(2000);
+    refused(
+        "text.svg",
+        drawing(&format!("<defs>{text}</defs>{uses}")).as_bytes(),
+    );
+}
+
+#[test]
+fn a_clip_path_built_once_is_charged_once() {
+    let path = long_path(50_000);
+    let rects = "<rect width='9' height='9' clip-path='url(#c)'/>".repeat(2000);
+    let clip = format!("<clipPath id='c'><path d='{path}'/></clipPath>");
+    renders("a.svg", &drawing(&format!("<defs>{clip}</defs>{rects}")));
+}
+
+#[test]
+#[cfg(unix)]
+fn a_data_image_counts_for_each_use() {
+    let png = padded_png(8 << 20);
+    let image = format!("<image id='i' width='1' height='1' href='data:image/png;base64,{png}'/>");
+    let uses = "<use href='#i'/>".repeat(2000);
+    let doc = drawing(&format!("<defs>{image}</defs>{uses}"));
+    refused("a.svg", doc.as_bytes());
+}
+
+#[test]
+#[cfg(unix)]
+fn a_marker_counts_for_each_vertex_it_lands_on() {
+    let marker = |id: &str, body: &str| {
+        format!("<marker id='{id}' markerWidth='9' markerHeight='9'>{body}</marker>")
+    };
+    let wide = marker("k", &format!("<path d='{}'/>", long_path(50_000)));
+    let vertices = format!("M0 0{}", "h1".repeat(20_000));
+    let line = format!("<path d='{vertices}' stroke='#000' marker-mid='url(#k)'/>");
+    let doc = drawing(&format!("<defs>{wide}</defs>{line}"));
+    refused("own.svg", doc.as_bytes());
+
+    let plain = format!("<path d='{vertices}' stroke='#000'/>");
+    let group = format!("<g style='marker-mid:url(#k)'>{plain}</g>");
+    let doc = drawing(&format!("<defs>{wide}</defs>{group}"));
+    refused("inherited.svg", doc.as_bytes());
+    let shape = format!("<defs>{wide}<path id='p' d='{vertices}' stroke='#000'/></defs>");
+    let doc = drawing(&format!(
+        "{shape}<g marker-mid='url(#k)'><use href='#p'/></g>"
+    ));
+    refused("through-use.svg", doc.as_bytes());
+    let rule = "<style>path{marker:url(#k)}</style>";
+    let doc = drawing(&format!("{rule}<defs>{wide}</defs>{plain}"));
+    refused("stylesheet.svg", doc.as_bytes());
+
+    let hops = format!("M0 0{}", "h1".repeat(300));
+    let level = |id: &str, next: &str| {
+        let mark = format!("marker-mid='url(#{next})'");
+        marker(id, &format!("<path d='{hops}' stroke='#000' {mark}/>"))
+    };
+    let end = marker("c", &format!("<path d='{hops}' stroke='#000'/>"));
+    let (a, b) = (level("a", "b"), level("b", "c"));
+    let line = format!("<path d='{hops}' stroke='#000' marker-mid='url(#a)'/>");
+    let doc = drawing(&format!("<defs>{a}{b}{end}</defs>{line}"));
+    refused("nested.svg", doc.as_bytes());
+}
+
+#[test]
+#[cfg(unix)]
+fn a_paint_or_a_mask_cant_hide_behind_inheritance() {
+    let rect = "<rect width='9' height='9'/>";
+    let tile = format!(
+        "<pattern id='p' width='.5' height='.5'>{}</pattern>",
+        rect.repeat(50_000)
+    );
+    let group = format!("<g fill='url(#p)'>{}</g>", rect.repeat(20_000));
+    let doc = drawing(&format!("<defs>{tile}</defs>{group}"));
+    refused("fill.svg", doc.as_bytes());
+
+    let stops = "<stop offset='1'/>".repeat(100_000);
+    let gradient = format!("<linearGradient id='g'>{stops}</linearGradient>");
+    let group = format!("<g fill='url(#g)'>{}</g>", rect.repeat(500_000));
+    let doc = drawing(&format!("<defs>{gradient}</defs>{group}"));
+    refused("gradient.svg", doc.as_bytes());
+
+    let path = long_path(50_000);
+    let mask = format!("<mask id='m'><path d='{path}' fill='#fff'/></mask>");
+    let child = "<rect width='9' height='9' mask='inherit'/>".repeat(20_000);
+    let doc = drawing(&format!("<defs>{mask}</defs><g mask='url(#m)'>{child}</g>"));
+    refused("mask.svg", doc.as_bytes());
+}
+
+#[test]
+#[cfg(unix)]
+fn a_marker_drawing_in_its_shapes_paint_copies_it_each_time() {
+    let tile = format!(
+        "<pattern id='p' width='.5' height='.5'>{}</pattern>",
+        "<rect width='9' height='9'/>".repeat(50_000)
+    );
+    let marker = "<marker id='k'><path d='M0 0h9v9z' fill='context-stroke'/></marker>";
+    let line = format!(
+        "<path d='M0 0{}' stroke='url(#p)' marker-mid='url(#k)'/>",
+        "h1".repeat(20_000)
+    );
+    let doc = drawing(&format!("<defs>{tile}{marker}</defs>{line}"));
+    refused("a.svg", doc.as_bytes());
+}
+
+#[test]
+fn arrowheads_on_a_large_chart_still_render() {
+    let head = "<marker id='a' markerWidth='9' markerHeight='9'><path d='M0 0L9 5L0 9z'/></marker>";
+    let edge = format!(
+        "<path d='{}' stroke='#000' marker-end='url(#a)'/>",
+        long_path(50)
+    );
+    let doc = drawing(&format!("<defs>{head}</defs>{}", edge.repeat(20_000)));
+    renders("a.svg", &doc);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_pattern_copied_for_each_use_counts_by_its_nodes() {
+    let rects = "<rect width='9' height='9'/>".repeat(50_000);
+    let tile = format!("<pattern id='p' width='.5' height='.5'>{rects}</pattern>");
+    let uses = "<rect width='9' height='9' fill='url(#p)'/>".repeat(20_000);
+    let doc = drawing(&format!("<defs>{tile}</defs>{uses}"));
+    refused("a.svg", doc.as_bytes());
+}
+
+#[test]
+fn a_pattern_shares_its_image_between_uses() {
+    let png = padded_png(4 << 20);
+    let image = format!("<image width='1' height='1' href='data:image/png;base64,{png}'/>");
+    let tile = format!("<pattern id='p' width='.5' height='.5'>{image}</pattern>");
+    let uses = "<rect width='9' height='9' fill='url(#p)'/>".repeat(500);
+    renders("a.svg", &drawing(&format!("<defs>{tile}</defs>{uses}")));
 }
 
 #[test]

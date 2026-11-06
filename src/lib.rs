@@ -15,6 +15,7 @@ pub mod raster;
 pub mod raw;
 pub mod resize;
 pub mod svg;
+mod svg_demand;
 pub mod tiff;
 pub mod webp;
 
